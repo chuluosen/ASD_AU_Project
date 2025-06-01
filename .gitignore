@@ -1,0 +1,12 @@
+# —— 数据与日志 ——
+data/
+logs/
+*.log
+*.txt
+
+# —— 大模型及权重 ——
+weights/
+*.pt
+
+# —— Jupyter / Colab 缓存 ——
+.ipynb_checkpoints/
