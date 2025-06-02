@@ -469,6 +469,8 @@ class ColabStage1Trainer:
         
         # 训练循环
         best_fitness = 0
+        patience_counter = 0
+        patience = self.config.get('patience', 8)
         
         try:
             for epoch in range(start_epoch, self.config['epochs']):
@@ -491,18 +493,30 @@ class ColabStage1Trainer:
                     f"Epoch {epoch+1}/{self.config['epochs']} - "
                     f"Train Loss: {train_loss[0]:.4f} - "
                     f"Val Loss: {val_loss[0]:.4f} - "
-                    f"LR: {optimizer.param_groups[0]['lr']:.6f}"
+                    f"LR: {optimizer.param_groups[0]['lr']:.6f} - "
+                    f"Patience: {patience_counter}/{patience}"
                 )
                 
                 # 保存检查点
                 if (epoch + 1) % self.config['save_period'] == 0:
                     self.save_checkpoint(model, optimizer, epoch, best_fitness, ema)
                 
-                # 保存最佳模型
+                # 保存最佳模型和早停检查
                 fitness = 1 / (val_loss[0] + 1e-6)
                 if fitness > best_fitness:
                     best_fitness = fitness
+                    patience_counter = 0
                     self.save_checkpoint(model, optimizer, epoch, best_fitness, ema, best=True)
+                    self.logger.info(f"New best model! Fitness: {fitness:.6f}")
+                else:
+                    patience_counter += 1
+                    
+                # 早停检查
+                if patience_counter >= patience:
+                    self.logger.info(f"Early stopping triggered at epoch {epoch+1}. "
+                                   f"No improvement for {patience} epochs.")
+                    self.save_checkpoint(model, optimizer, epoch, best_fitness, ema)
+                    break
                 
                 # 检查Colab运行时间
                 if self.check_runtime_limit():
@@ -600,7 +614,7 @@ def main():
         'cache_images': False,  # 节省内存
         
         # 训练配置
-        'epochs': 80,
+        'epochs': 40,
         'lr0': 0.002,
         'optimizer': 'AdamW',
         'scheduler': 'cosine',
@@ -609,6 +623,7 @@ def main():
         'save_period': 5,  # 更频繁保存
         'amp': True,  # 混合精度训练
         'gradient_accumulation': 2,  # 梯度累积
+        'patience': 8,  # 早停机制：8个epoch验证损失不下降就停止
         
         # 保存配置
         'save_dir': '/content/runs/stage1_hda_synchild',
