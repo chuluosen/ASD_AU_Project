@@ -47,6 +47,17 @@ def setup_colab_env():
     drive_save_dir = Path('/content/drive/MyDrive/ASD_AU_weights/stage1')
     drive_save_dir.mkdir(parents=True, exist_ok=True)
     
+    # 检查数据划分脚本的输出
+    yolo_data_path = Path('/content/yolo_data')
+    if yolo_data_path.exists():
+        print(f"✅ Found dataset from split script at: {yolo_data_path}")
+        # 显示数据统计
+        for split in ['train', 'val', 'test']:
+            img_dir = yolo_data_path / 'images' / split
+            if img_dir.exists():
+                img_count = len(list(img_dir.glob('*')))
+                print(f"   {split:5s}: {img_count:,} images")
+    
     return project_root, drive_save_dir
 
 # 设置环境
@@ -207,38 +218,62 @@ class ColabStage1Trainer:
         self.logger.info(f"Frozen parameters: {total_params - trainable_params:,}")
         
     def setup_data_paths(self):
-        """设置数据路径（Colab特定）"""
-        # 检查数据是否在本地
-        local_data_root = Path('/content/datasets/HDA-SynChild')
-        drive_data_root = Path('/content/drive/MyDrive/datasets/HDA-SynChild')
+        """设置数据路径（兼容用户的数据划分脚本）"""
+        # 按优先级检查数据路径
+        data_candidates = [
+            Path('/content/yolo_data'),                                    # 用户划分脚本的默认输出
+            Path('/content/drive/MyDrive/datasets/HDA-SynChild'),         # Drive标准位置
+            Path('/content/datasets/HDA-SynChild'),                       # 本地位置
+        ]
         
-        if local_data_root.exists():
-            return local_data_root
-        elif drive_data_root.exists():
-            # 创建符号链接
-            local_data_root.parent.mkdir(exist_ok=True)
-            if not local_data_root.exists():
-                os.symlink(drive_data_root, local_data_root)
-            return local_data_root
-        else:
-            raise RuntimeError(f"Dataset not found! Please upload to: {drive_data_root}")
+        for data_root in data_candidates:
+            if data_root.exists() and (data_root / 'images' / 'train').exists():
+                self.logger.info(f"Found dataset at: {data_root}")
+                
+                # 如果数据在临时位置，创建符号链接到标准位置优化访问
+                if str(data_root) == '/content/yolo_data':
+                    standard_path = Path('/content/datasets/HDA-SynChild')
+                    standard_path.parent.mkdir(exist_ok=True)
+                    if not standard_path.exists():
+                        os.symlink(data_root, standard_path)
+                        self.logger.info(f"Created symlink: {standard_path} -> {data_root}")
+                        return standard_path
+                
+                return data_root
+        
+        # 如果都没找到，给出详细的提示
+        raise RuntimeError(
+            "Dataset not found! Please ensure your data is in one of these locations:\n"
+            "1. /content/yolo_data (output from your data split script)\n"
+            "2. /content/drive/MyDrive/datasets/HDA-SynChild\n"
+            "3. /content/datasets/HDA-SynChild\n"
+            "Required structure: {path}/images/train/, {path}/images/val/, {path}/labels/train/, {path}/labels/val/"
+        )
     
     def create_dataloaders(self):
         """创建数据加载器（Colab优化）"""
         # 设置数据路径
         data_root = self.setup_data_paths()
         
-        # 创建data yaml
-        data_yaml = self.save_dir / 'hda_synchild_colab.yaml'
-        data_dict = {
-            'path': str(data_root),
-            'train': 'images/train',
-            'val': 'images/val',
-            'names': {0: 'face'}
-        }
+        # 检查是否存在用户生成的data.yaml
+        user_data_yaml = data_root / 'data.yaml'
+        if user_data_yaml.exists():
+            self.logger.info(f"Using existing data.yaml from: {user_data_yaml}")
+            data_yaml = user_data_yaml
+        else:
+            # 创建data yaml
+            data_yaml = self.save_dir / 'hda_synchild_colab.yaml'
+            data_dict = {
+                'path': str(data_root),
+                'train': 'images/train',
+                'val': 'images/val',
+                'names': {0: 'face'}
+            }
+            
+            with open(data_yaml, 'w') as f:
+                yaml.dump(data_dict, f)
+            self.logger.info(f"Created data.yaml at: {data_yaml}")
         
-        with open(data_yaml, 'w') as f:
-            yaml.dump(data_dict, f)
         
         # Colab优化的超参数
         hyp = self.get_hyp_dict()
