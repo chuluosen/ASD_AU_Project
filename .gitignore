@@ -10,3 +10,5 @@ weights/
 
 # —— Jupyter / Colab 缓存 ——
 .ipynb_checkpoints/
+.claude/
+CLAUDE.md
