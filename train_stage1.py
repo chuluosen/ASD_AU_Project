@@ -1075,6 +1075,17 @@ class ColabStage1Trainer:
                 
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
                     pred = model(imgs)
+                    
+                    # 验证时也需要处理模型输出格式
+                    if isinstance(pred, list) and len(pred) > 0:
+                        # 检查是否为嵌套列表（训练模式下可能返回 [detection_outputs, aux_outputs]）
+                        if isinstance(pred[0], list):
+                            # 取第一个子列表作为检测输出
+                            pred = pred[0]
+                        
+                        # 确保所有元素都是tensor
+                        pred = [p for p in pred if hasattr(p, 'view')]  # 只保留tensor
+                    
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
                 losses.append(loss_items.cpu().numpy())
