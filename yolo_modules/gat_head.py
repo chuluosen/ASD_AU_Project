@@ -9,12 +9,18 @@ class GATAUHead(nn.Module):
                  num_au: int = 32, num_heads: int = 4,
                  adj_mat: torch.Tensor = None):
         super().__init__()
+        self.num_au = num_au
         self.register_buffer("edge_index", self._adj_to_edge_index(adj_mat))
         self.gat = GATConv(in_channels, hidden // num_heads,
                           heads=num_heads, concat=True, dropout=0.2)
         self.classifier = nn.Linear(hidden, num_au)
     
     def _adj_to_edge_index(self, adj):
+        if adj is None:
+            # 创建默认的全连接图 (每个AU节点连接到所有其他AU节点)
+            print(f"Warning: No adjacency matrix provided, creating fully connected graph for {self.num_au} AU nodes")
+            adj = torch.ones((self.num_au, self.num_au)) - torch.eye(self.num_au)  # 全连接但不自连
+        
         src, dst = torch.nonzero(adj, as_tuple=True)
         edge_index = torch.stack([torch.cat([src, dst]),
                                  torch.cat([dst, src])], dim=0)
