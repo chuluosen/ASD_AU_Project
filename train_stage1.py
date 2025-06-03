@@ -88,7 +88,7 @@ try:
     from models.yolo import Model as Yolov9
     from utils.dataloaders import create_dataloader
     from utils.general import increment_path, colorstr, check_img_size, LOGGER
-    from utils.loss import ComputeLoss
+    from utils.loss_tal import ComputeLoss
     from utils.torch_utils import ModelEMA, de_parallel
     from utils.metrics import fitness
     from val import run as validate
