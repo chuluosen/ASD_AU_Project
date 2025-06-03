@@ -199,9 +199,8 @@ class ColabStage1Trainer:
         
         # 创建YOLOv9模型
         model = Yolov9(cfg=cfg_path, ch=3, nc=1)  # nc=1 for face detection
-        model = model.to(self.device)  # 确保模型在正确的设备上
         
-        # 加载预训练权重
+        # 加载预训练权重（在移到GPU之前）
         if self.config['pretrained_weights']:
             weights_path = Path(self.config['pretrained_weights'])
             
@@ -302,6 +301,10 @@ class ColabStage1Trainer:
                     self.logger.warning("No pretrained weights loaded, training from scratch")
             else:
                 self.logger.warning(f"Pretrained weights not found: {weights_path}")
+        
+        # 权重加载完成后，移动模型到GPU
+        model = model.to(self.device)
+        self.logger.info(f"Model moved to device: {self.device}")
         
         # 恢复训练（跳过不兼容的checkpoint）
         start_epoch = 0
@@ -559,7 +562,25 @@ class ColabStage1Trainer:
                 if i == 0:
                     self.logger.info(f"Raw model output type: {type(pred)}")
                     self.logger.info(f"Model training mode: {model.training}")
-                    
+                    if isinstance(pred, list):
+                        self.logger.info(f"Pred list length: {len(pred)}")
+                        for j, p in enumerate(pred):
+                            self.logger.info(f"Pred[{j}] type: {type(p)}, content: {p if not isinstance(p, torch.Tensor) else f'Tensor shape: {p.shape}'}")
+                
+                # 如果模型输出是嵌套列表，需要展平
+                if isinstance(pred, list) and len(pred) > 0:
+                    if isinstance(pred[0], list):
+                        # 展平嵌套列表
+                        flattened_pred = []
+                        for sublist in pred:
+                            if isinstance(sublist, list):
+                                flattened_pred.extend([item for item in sublist if isinstance(item, torch.Tensor)])
+                            elif isinstance(sublist, torch.Tensor):
+                                flattened_pred.append(sublist)
+                        pred = flattened_pred
+                        if i == 0:
+                            self.logger.info(f"Flattened to {len(pred)} tensors")
+                
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
             
