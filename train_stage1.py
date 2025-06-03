@@ -63,15 +63,34 @@ def setup_colab_env():
 # 设置环境
 PROJECT_ROOT, DRIVE_SAVE_DIR = setup_colab_env()
 
-# 导入YOLOv9组件
-from models.yolo import Model as Yolov9
-from utils.dataloaders import create_dataloader
-from utils.general import increment_path, colorstr, check_img_size, LOGGER
-from utils.loss import ComputeLoss
-from utils.torch_utils import ModelEMA, de_parallel
-from utils.metrics import fitness
-from val import run as validate
-from utils.callbacks import Callbacks
+# 确保YOLOv9路径正确添加
+yolov9_path = PROJECT_ROOT / 'code' / 'yolov9'
+if str(yolov9_path) not in sys.path:
+    sys.path.insert(0, str(yolov9_path))
+
+# 验证路径和导入
+print(f"YOLOv9 path: {yolov9_path}")
+print(f"YOLOv9 path exists: {yolov9_path.exists()}")
+
+try:
+    # 导入YOLOv9组件
+    from models.yolo import Model as Yolov9
+    from utils.dataloaders import create_dataloader
+    from utils.general import increment_path, colorstr, check_img_size, LOGGER
+    from utils.loss import ComputeLoss
+    from utils.torch_utils import ModelEMA, de_parallel
+    from utils.metrics import fitness
+    from val import run as validate
+    from utils.callbacks import Callbacks
+    print("✅ YOLOv9 modules imported successfully")
+except ImportError as e:
+    print(f"❌ Failed to import YOLOv9 modules: {e}")
+    print("📁 Available files in yolov9 directory:")
+    if yolov9_path.exists():
+        import os
+        for item in os.listdir(yolov9_path):
+            print(f"   {item}")
+    raise
 
 # 导入自定义模块
 from yolo_modules.model_wrapper import Y9_GAT_DA
