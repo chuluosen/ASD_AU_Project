@@ -188,6 +188,11 @@ class ColabStage1Trainer:
             torch.backends.cudnn.allow_tf32 = True
             self.logger.info("Enabled TensorFloat-32 for A100 optimization")
         
+        # 启用YOLOv9的pin_memory优化（通过环境变量）
+        if self.config.get('pin_memory', True):
+            os.environ['PIN_MEMORY'] = 'True'
+            self.logger.info("Enabled pin_memory for DataLoader optimization")
+        
         # 检查是否有之前的checkpoint
         self.check_resume()
         
@@ -562,10 +567,7 @@ class ColabStage1Trainer:
             image_weights=False,
             quad=False,
             prefix='train: ',
-            shuffle=True,
-            pin_memory=self.config.get('pin_memory', True),
-            persistent_workers=self.config.get('persistent_workers', True),
-            prefetch_factor=self.config.get('prefetch_factor', 2)
+            shuffle=True
         )
         
         # 验证数据加载器 - A100优化版
@@ -582,10 +584,7 @@ class ColabStage1Trainer:
             rank=-1,
             workers=self.config['workers'],
             pad=0.5,
-            prefix='val: ',
-            pin_memory=self.config.get('pin_memory', True),
-            persistent_workers=self.config.get('persistent_workers', True),
-            prefetch_factor=self.config.get('prefetch_factor', 2)
+            prefix='val: '
         )[0]
         
         return train_loader, val_loader, dataset
@@ -1331,12 +1330,10 @@ def main():
         'img_size': 640,
         'batch_size': 32,           # A100可以支持更大batch_size
         'workers': 16,              # A100支持更多并行workers
-        'pin_memory': True,         # 启用pin_memory加速数据传输
+        'pin_memory': True,         # 启用pin_memory加速数据传输（通过环境变量）
         'cache_images': False,      # 禁用缓存避免损坏文件
         'check_images': False,      # 跳过图像检查加速启动
         'rect': True,               # A100内存充足，启用矩形训练提效
-        'prefetch_factor': 4,       # 预取更多批次
-        'persistent_workers': True, # 保持worker进程提速
         
         # 训练配置 - A100加速版
         'epochs': 20,               # 保持20个epochs
