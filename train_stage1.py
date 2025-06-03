@@ -171,16 +171,34 @@ class ColabStage1Trainer:
         self.logger = logging.getLogger(__name__)
         
     def create_model(self):
-        """创建模型并冻结GAT-AU和情绪头"""
-        self.logger.info("Creating model...")
+        """创建YOLOv9检测器模型（Stage 1 只训练检测器）"""
+        self.logger.info("Creating YOLOv9 detector for Stage 1...")
         
-        # 创建包装的模型
-        model = Y9_GAT_DA(
-            y9_cfg=self.config['model_cfg'],
-            num_au=self.config['num_au'],
-            num_emotion=self.config['num_emotion'],
-            device=self.device
-        )
+        # 直接创建YOLOv9检测器
+        cfg_path = self.config['model_cfg']
+        
+        # 如果是相对路径，尝试多个位置查找
+        if not os.path.isabs(cfg_path):
+            cfg_candidates = [
+                os.path.join('/content', cfg_path),
+                os.path.join(PROJECT_ROOT, 'code', 'yolov9', 'models', 'detect', cfg_path),
+                os.path.join(PROJECT_ROOT, 'code', 'yolov9', 'models', cfg_path),
+                os.path.join(PROJECT_ROOT, 'code', 'yolov9', 'models', 'detect', 'yolov9-c.yaml'),  # 回退
+            ]
+            
+            cfg_found = None
+            for candidate in cfg_candidates:
+                if os.path.exists(candidate):
+                    cfg_found = candidate
+                    self.logger.info(f"Found config at: {cfg_found}")
+                    break
+            
+            if cfg_found is None:
+                raise FileNotFoundError(f"Config file not found. Tried: {cfg_candidates}")
+            cfg_path = cfg_found
+        
+        # 创建YOLOv9模型
+        model = Yolov9(cfg=cfg_path, ch=3, nc=1)  # nc=1 for face detection
         
         # 加载预训练权重
         if self.config['pretrained_weights']:
@@ -246,7 +264,7 @@ class ColabStage1Trainer:
                         self.logger.warning("Proceeding without pretrained weights...")
                         ckpt = None
                 
-                # 只加载检测器的权重
+                # 加载检测器权重（直接加载到YOLOv9模型）
                 if ckpt is not None:
                     state_dict = ckpt['model'] if 'model' in ckpt else ckpt
                     if hasattr(state_dict, 'state_dict'):
@@ -254,41 +272,19 @@ class ColabStage1Trainer:
                     
                     # 获取模型当前的state_dict作为参考
                     model_state = model.state_dict()
-                    detector_state = {}
+                    compatible_state = {}
                     
-                    # 尝试多种匹配策略
-                    # 策略1: 直接匹配detector.*键
+                    # 尝试直接匹配键名
                     for k, v in state_dict.items():
-                        if not any(module in k for module in ['gat_head', 'emotion_head', 'domain_cls']):
-                            detector_key = f'detector.{k}'
-                            if detector_key in model_state and v.shape == model_state[detector_key].shape:
-                                detector_state[detector_key] = v
-                    
-                    # 策略2: 如果策略1匹配很少，尝试直接匹配（可能权重已经包含detector前缀）
-                    if len(detector_state) < 10:  # 如果匹配的权重很少
-                        self.logger.warning("Few weights matched with detector prefix, trying direct matching...")
-                        detector_state = {}
-                        for k, v in state_dict.items():
-                            if k.startswith('detector.') and not any(module in k for module in ['gat_head', 'emotion_head', 'domain_cls']):
-                                if k in model_state and v.shape == model_state[k].shape:
-                                    detector_state[k] = v
-                    
-                    # 策略3: 如果仍然匹配很少，尝试去掉detector前缀进行匹配
-                    if len(detector_state) < 10:
-                        self.logger.warning("Still few weights matched, trying without detector prefix...")
-                        detector_state = {}
-                        for k, v in state_dict.items():
-                            # 去掉可能的detector前缀
-                            clean_k = k.replace('detector.', '') if k.startswith('detector.') else k
-                            if not any(module in clean_k for module in ['gat_head', 'emotion_head', 'domain_cls']):
-                                detector_key = f'detector.{clean_k}'
-                                if detector_key in model_state and v.shape == model_state[detector_key].shape:
-                                    detector_state[detector_key] = v
+                        # 去掉可能的detector前缀
+                        clean_k = k.replace('detector.', '') if k.startswith('detector.') else k
+                        if clean_k in model_state and v.shape == model_state[clean_k].shape:
+                            compatible_state[clean_k] = v
                     
                     # 加载权重
-                    if detector_state:
-                        missing_keys, unexpected_keys = model.load_state_dict(detector_state, strict=False)
-                        self.logger.info(f"Pretrained detector weights loaded successfully. Matched {len(detector_state)} layers.")
+                    if compatible_state:
+                        missing_keys, unexpected_keys = model.load_state_dict(compatible_state, strict=False)
+                        self.logger.info(f"Pretrained weights loaded successfully. Matched {len(compatible_state)} layers.")
                         
                         # 详细的加载信息
                         if missing_keys:
@@ -298,20 +294,9 @@ class ColabStage1Trainer:
                     else:
                         self.logger.warning("No compatible weights found! Training from scratch...")
                         
-                        # 调试信息：显示权重文件中的前几个键
-                        self.logger.debug("Available keys in weight file (first 10):")
-                        for i, k in enumerate(list(state_dict.keys())[:10]):
-                            self.logger.debug(f"  {k}: {state_dict[k].shape}")
-                        
-                        # 显示模型中期望的键
-                        detector_keys = [k for k in model_state.keys() if k.startswith('detector.')]
-                        self.logger.debug(f"Expected detector keys in model (first 10):")
-                        for i, k in enumerate(detector_keys[:10]):
-                            self.logger.debug(f"  {k}: {model_state[k].shape}")
-                        
                     # 显示匹配统计
-                    total_model_params = len([k for k in model_state.keys() if k.startswith('detector.')])
-                    self.logger.info(f"Weight loading: {len(detector_state)}/{total_model_params} detector layers matched")
+                    total_model_params = len(model_state.keys())
+                    self.logger.info(f"Weight loading: {len(compatible_state)}/{total_model_params} layers matched")
                 else:
                     self.logger.warning("No pretrained weights loaded, training from scratch")
             else:
@@ -326,9 +311,7 @@ class ColabStage1Trainer:
             start_epoch = checkpoint['epoch'] + 1
             self.logger.info(f"Resumed from epoch {start_epoch}")
         
-        # 冻结GAT-AU头和情绪头
-        self.freeze_modules(model)
-        
+        # Stage 1不需要冻结模块（只有检测器）
         # 打印参数统计
         self.print_param_stats(model)
         
@@ -550,13 +533,13 @@ class ColabStage1Trainer:
             
             # 前向传播
             with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
-                # 使用原始的检测器输出
-                pred = model.detector(imgs)
+                # 直接使用YOLOv9模型
+                pred = model(imgs)
                 
                 # 第一个batch时打印调试信息
                 if i == 0:
                     self.logger.info(f"Raw model output type: {type(pred)}")
-                    self.logger.info(f"Model detector training mode: {model.detector.training}")
+                    self.logger.info(f"Model training mode: {model.training}")
                     
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
@@ -594,9 +577,9 @@ class ColabStage1Trainer:
         # 创建数据加载器
         train_loader, val_loader, dataset = self.create_dataloaders()
         
-        # 添加超参数到检测器模型（损失函数需要）
+        # 添加超参数到模型（损失函数需要）
         hyp = self.get_hyp_dict()
-        model.detector.hyp = hyp
+        model.hyp = hyp
         
         # 设置模型为训练模式
         model.train()
@@ -604,10 +587,10 @@ class ColabStage1Trainer:
         # 确保模型stride和检测头正确初始化
         self.logger.info("Initializing model detection head...")
         with torch.no_grad():
-            _ = model.detector(torch.zeros(1, 3, self.config['img_size'], self.config['img_size'], device=self.device))
+            _ = model(torch.zeros(1, 3, self.config['img_size'], self.config['img_size'], device=self.device))
         
         # 创建损失函数
-        compute_loss = ComputeLoss(model.detector)
+        compute_loss = ComputeLoss(model)
         
         # 创建优化器
         optimizer = self.create_optimizer(model)
@@ -700,7 +683,7 @@ class ColabStage1Trainer:
     
     def create_optimizer(self, model):
         """创建优化器"""
-        params_to_optimize = [p for p in model.detector.parameters() if p.requires_grad]
+        params_to_optimize = [p for p in model.parameters() if p.requires_grad]
         
         if self.config['optimizer'] == 'AdamW':
             optimizer = torch.optim.AdamW(
@@ -744,7 +727,7 @@ class ColabStage1Trainer:
                 imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
                 
                 with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
-                    pred = model.detector(imgs)
+                    pred = model(imgs)
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
                 losses.append(loss_items.cpu().numpy())
