@@ -439,6 +439,81 @@ class ColabStage1Trainer:
         return model, start_epoch
     
     # freeze_modules 函数已移除 - Stage1只训练纯YOLOv9检测器
+    
+    def flatten_nested_tensors(self, nested_structure):
+        """递归扁平化嵌套结构，只保留torch.Tensor对象"""
+        flattened = []
+        
+        def _recursive_flatten(item):
+            if isinstance(item, torch.Tensor):
+                # 确保张量有view方法（基本上所有tensor都有）
+                if hasattr(item, 'view'):
+                    flattened.append(item)
+            elif isinstance(item, (list, tuple)):
+                for sub_item in item:
+                    _recursive_flatten(sub_item)
+        
+        _recursive_flatten(nested_structure)
+        return flattened
+    
+    def process_model_output_for_loss(self, raw_output, is_training=True, debug=False):
+        """
+        完善的模型输出处理，确保返回扁平化的张量列表
+        
+        Args:
+            raw_output: 模型的原始输出
+            is_training: 是否为训练模式
+            debug: 是否输出调试信息
+            
+        Returns:
+            list: 扁平化的torch.Tensor列表，可直接传给ComputeLoss
+        """
+        if debug:
+            self.logger.info(f"Raw output type: {type(raw_output)}")
+            if isinstance(raw_output, (list, tuple)):
+                self.logger.info(f"Raw output length: {len(raw_output)}")
+                for i, item in enumerate(raw_output):
+                    self.logger.info(f"  raw_output[{i}] type: {type(item)}, "
+                                   f"shape/len: {getattr(item, 'shape', len(item) if isinstance(item, (list, tuple)) else 'unknown')}")
+        
+        # 步骤1: 获取模型原始输出
+        potential_predictions = raw_output
+        
+        # 步骤2: 处理评估模式下的元组输出
+        if isinstance(raw_output, tuple):
+            if debug:
+                self.logger.info("Detected tuple output (eval mode)")
+            
+            # YOLOv9在eval模式下通常返回 (inference_detections, raw_predictions)
+            # 我们需要raw_predictions用于损失计算
+            if len(raw_output) >= 2:
+                potential_predictions = raw_output[1]  # 通常raw predictions在第二个位置
+                if debug:
+                    self.logger.info(f"Using tuple[1] as potential_predictions: {type(potential_predictions)}")
+            else:
+                potential_predictions = raw_output[0]
+                if debug:
+                    self.logger.info(f"Using tuple[0] as potential_predictions: {type(potential_predictions)}")
+        
+        # 步骤3: 扁平化处理（处理可能的嵌套列表）
+        flattened_tensors = self.flatten_nested_tensors(potential_predictions)
+        
+        if debug:
+            self.logger.info(f"Final flattened tensors count: {len(flattened_tensors)}")
+            for i, tensor in enumerate(flattened_tensors):
+                if hasattr(tensor, 'shape'):
+                    self.logger.info(f"  tensor[{i}] shape: {tensor.shape}")
+        
+        # 步骤4: 验证结果
+        if not flattened_tensors:
+            self.logger.warning("No valid tensors found in model output!")
+            # 如果扁平化失败，尝试直接返回原始输出
+            if isinstance(potential_predictions, list):
+                return potential_predictions
+            else:
+                return [potential_predictions] if hasattr(potential_predictions, 'view') else []
+        
+        return flattened_tensors
         
     def print_param_stats(self, model):
         """打印参数统计"""
@@ -724,29 +799,10 @@ class ColabStage1Trainer:
             # 前向传播
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
                 # 直接使用YOLOv9模型
-                pred = model(imgs)
+                raw_pred = model(imgs)
                 
-                # 第一个batch时打印调试信息
-                if i == 0:
-                    self.logger.info(f"Model output type: {type(pred)}")
-                    if isinstance(pred, list):
-                        self.logger.info(f"Output list length: {len(pred)}")
-                        for j, p in enumerate(pred):
-                            self.logger.info(f"pred[{j}] type: {type(p)}, shape/len: {p.shape if hasattr(p, 'shape') else len(p) if isinstance(p, list) else 'unknown'}")
-                
-                # Stage1: 处理模型输出格式 - 确保输出是tensor列表而不是嵌套列表
-                if isinstance(pred, list) and len(pred) > 0:
-                    # 检查是否为嵌套列表（训练模式下可能返回 [detection_outputs, aux_outputs]）
-                    if isinstance(pred[0], list):
-                        # 取第一个子列表作为检测输出
-                        pred = pred[0]
-                        if i == 0:
-                            self.logger.info(f"Using nested list[0] as detection output, length: {len(pred)}")
-                    
-                    # 确保所有元素都是tensor
-                    pred = [p for p in pred if hasattr(p, 'view')]  # 只保留tensor
-                    if i == 0:
-                        self.logger.info(f"Final prediction tensors: {len(pred)}")
+                # 使用完善的输出处理方法
+                pred = self.process_model_output_for_loss(raw_pred, is_training=True, debug=(i == 0))
                 
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
@@ -1117,17 +1173,10 @@ class ColabStage1Trainer:
                 imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
                 
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
-                    pred = model(imgs)
+                    raw_pred = model(imgs)
                     
-                    # 验证时也需要处理模型输出格式
-                    if isinstance(pred, list) and len(pred) > 0:
-                        # 检查是否为嵌套列表（训练模式下可能返回 [detection_outputs, aux_outputs]）
-                        if isinstance(pred[0], list):
-                            # 取第一个子列表作为检测输出
-                            pred = pred[0]
-                        
-                        # 确保所有元素都是tensor
-                        pred = [p for p in pred if hasattr(p, 'view')]  # 只保留tensor
+                    # 使用完善的输出处理方法（验证模式可能返回tuple）
+                    pred = self.process_model_output_for_loss(raw_pred, is_training=False, debug=False)
                     
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
