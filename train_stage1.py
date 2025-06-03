@@ -302,14 +302,32 @@ class ColabStage1Trainer:
             else:
                 self.logger.warning(f"Pretrained weights not found: {weights_path}")
         
-        # 恢复训练
+        # 恢复训练（跳过不兼容的checkpoint）
         start_epoch = 0
         if self.config.get('resume'):
-            self.logger.info(f"Resuming from checkpoint: {self.config['resume']}")
-            checkpoint = torch.load(self.config['resume'], map_location=self.device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            self.logger.info(f"Resumed from epoch {start_epoch}")
+            self.logger.info(f"Found checkpoint: {self.config['resume']}")
+            try:
+                checkpoint = torch.load(self.config['resume'], map_location=self.device)
+                # 检查checkpoint是否与当前模型架构兼容
+                checkpoint_keys = set(checkpoint['model_state_dict'].keys())
+                model_keys = set(model.state_dict().keys())
+                
+                # 如果checkpoint包含GAT/emotion组件，说明是旧的包装模型，跳过
+                has_old_components = any(key.startswith(('gat_head', 'emotion_head', 'roi_extractor')) 
+                                       for key in checkpoint_keys)
+                
+                if has_old_components:
+                    self.logger.warning("Checkpoint contains old model architecture (Y9_GAT_DA). Starting fresh training with new YOLOv9-only architecture.")
+                    start_epoch = 0
+                else:
+                    # 兼容的checkpoint，可以恢复
+                    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    start_epoch = checkpoint['epoch'] + 1
+                    self.logger.info(f"Resumed from epoch {start_epoch}")
+                    
+            except Exception as e:
+                self.logger.warning(f"Failed to load checkpoint: {e}. Starting fresh training.")
+                start_epoch = 0
         
         # Stage 1不需要冻结模块（只有检测器）
         # 打印参数统计
