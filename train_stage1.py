@@ -47,6 +47,22 @@ def setup_colab_env():
     drive_save_dir = Path('/content/drive/MyDrive/ASD_AU_weights/stage1')
     drive_save_dir.mkdir(parents=True, exist_ok=True)
     
+    # 清理缓存避免损坏文件问题
+    print("Cleaning cache files...")
+    cache_patterns = [
+        '/content/ASD_AU_Project/**/*.cache',
+        '/tmp/*.cache',
+        '/content/**/*.cache'
+    ]
+    import glob
+    for pattern in cache_patterns:
+        for cache_file in glob.glob(pattern, recursive=True):
+            try:
+                os.remove(cache_file)
+                print(f"Removed cache: {cache_file}")
+            except:
+                pass
+    
     # 检查数据划分脚本的输出（支持嵌套路径）
     data_candidates = [
         Path('/content/yolo_data/yolo_data'),  # 用户当前的实际路径
@@ -392,10 +408,70 @@ class ColabStage1Trainer:
             "Required structure: {path}/images/train/, {path}/images/val/, {path}/labels/train/, {path}/labels/val/"
         )
     
+    def check_image_integrity(self, data_root):
+        """检查图像完整性，删除损坏的文件"""
+        if not self.config.get('check_images', False):
+            return
+            
+        print("Checking image integrity...")
+        import cv2
+        corrupt_count = 0
+        
+        for split in ['train', 'val']:
+            img_dir = data_root / 'images' / split
+            if not img_dir.exists():
+                continue
+                
+            img_files = list(img_dir.glob('*.jpg')) + list(img_dir.glob('*.png')) + list(img_dir.glob('*.jpeg'))
+            
+            for img_path in img_files:
+                try:
+                    # 尝试读取图像
+                    img = cv2.imread(str(img_path))
+                    if img is None:
+                        print(f"Removing corrupt image: {img_path}")
+                        img_path.unlink()  # 删除损坏的文件
+                        
+                        # 同时删除对应的标签文件
+                        label_path = data_root / 'labels' / split / (img_path.stem + '.txt')
+                        if label_path.exists():
+                            label_path.unlink()
+                            
+                        corrupt_count += 1
+                    else:
+                        # 检查图像是否能正常解码
+                        if img.shape[0] < 10 or img.shape[1] < 10:
+                            print(f"Removing too small image: {img_path}")
+                            img_path.unlink()
+                            
+                            label_path = data_root / 'labels' / split / (img_path.stem + '.txt')
+                            if label_path.exists():
+                                label_path.unlink()
+                                
+                            corrupt_count += 1
+                except Exception as e:
+                    print(f"Error checking {img_path}: {e}")
+                    try:
+                        img_path.unlink()
+                        label_path = data_root / 'labels' / split / (img_path.stem + '.txt')
+                        if label_path.exists():
+                            label_path.unlink()
+                        corrupt_count += 1
+                    except:
+                        pass
+        
+        if corrupt_count > 0:
+            print(f"Removed {corrupt_count} corrupt images")
+        else:
+            print("All images are intact")
+
     def create_dataloaders(self):
         """创建数据加载器（Colab优化）"""
         # 设置数据路径
         data_root = self.setup_data_paths()
+        
+        # 检查图像完整性
+        self.check_image_integrity(data_root)
         
         # 检查是否存在用户生成的data.yaml
         user_data_yaml = data_root / 'data.yaml'
@@ -435,10 +511,10 @@ class ColabStage1Trainer:
             single_cls=True,
             hyp=hyp,
             augment=True,
-            cache='ram' if gpu_mem > 20 else False,  # 只在大内存时缓存
-            rect=False,
+            cache=False,  # 完全禁用缓存避免损坏文件
+            rect=self.config.get('rect', False),  # 使用配置控制
             rank=-1,
-            workers=self.config['workers'],  # L4优化：更多workers
+            workers=self.config['workers'],
             image_weights=False,
             quad=False,
             prefix='train: ',
@@ -454,10 +530,10 @@ class ColabStage1Trainer:
             single_cls=True,
             hyp=hyp,
             augment=False,
-            cache='ram' if gpu_mem > 20 else False,
-            rect=True,
+            cache=False,  # 完全禁用缓存避免损坏文件
+            rect=True,  # 验证时可以使用rect
             rank=-1,
-            workers=self.config['workers'],  # L4优化：更多workers
+            workers=self.config['workers'],
             pad=0.5,
             prefix='val: '
         )[0]
@@ -804,7 +880,9 @@ def main():
         'batch_size': 12,           # 降低batch_size避免OOM
         'workers': 6,               # L4性能更强，支持更多workers
         'pin_memory': True,         # 启用pin_memory加速数据传输
-        'cache_images': False,      # 节省内存
+        'cache_images': False,      # 完全禁用缓存避免损坏
+        'check_images': True,       # 启用图像完整性检查
+        'rect': False,              # 禁用矩形训练避免缓存问题
         
         # 训练配置 - L4加速版
         'epochs': 20,               # 保持20个epochs
