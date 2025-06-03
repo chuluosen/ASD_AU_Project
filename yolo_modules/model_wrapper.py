@@ -62,12 +62,29 @@ class Y9_GAT_DA(nn.Module):
         self.conf_thres = conf_thres
         self.p3_stride = p3_stride
         
-        # 构建 YOLOv9 配置文件的完整路径
-        cfg_path = os.path.join(yolov9_path, 'models', y9_cfg)
+        # 构建 YOLOv9 配置文件的完整路径，支持多种可能的位置
+        cfg_candidates = [
+            y9_cfg if os.path.isabs(y9_cfg) else None,  # 绝对路径
+            os.path.join('/content', y9_cfg),  # Colab根目录
+            os.path.join(yolov9_path, 'models', 'detect', y9_cfg),  # 标准detect目录
+            os.path.join(yolov9_path, 'models', y9_cfg),  # models目录
+        ]
         
-        # 验证配置文件是否存在
-        if not os.path.exists(cfg_path):
-            raise FileNotFoundError(f"YOLOv9 config file not found: {cfg_path}")
+        cfg_path = None
+        for candidate in cfg_candidates:
+            if candidate and os.path.exists(candidate):
+                cfg_path = candidate
+                break
+        
+        # 如果找不到指定配置，尝试回退到标准yolov9-c.yaml
+        if cfg_path is None:
+            fallback_cfg = os.path.join(yolov9_path, 'models', 'detect', 'yolov9-c.yaml')
+            if os.path.exists(fallback_cfg):
+                cfg_path = fallback_cfg
+                LOGGER.warning(f"Config {y9_cfg} not found, using fallback: {fallback_cfg}")
+        
+        if cfg_path is None:
+            raise FileNotFoundError(f"YOLOv9 config file not found. Tried: {y9_cfg}, fallback: yolov9-c.yaml")
         
         # 初始化检测器
         self.detector = Yolov9(cfg=cfg_path, ch=3, nc=1)  # nc=1 for face only

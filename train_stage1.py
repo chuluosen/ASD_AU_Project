@@ -182,6 +182,7 @@ class ColabStage1Trainer:
                     Path('/content') / weights_path.name,                                    # Colab根目录
                     Path('/content/drive/MyDrive/ASD_AU_weights/pretrained') / weights_path.name,  # Drive位置
                     self.drive_save_dir.parent / 'pretrained' / weights_path.name,          # 默认Drive位置
+                    Path('/content') / 'yolov9c_face_weights_only.pt',                      # 修正的权重文件（直接路径）
                 ]
                 
                 for candidate in weight_candidates:
@@ -236,17 +237,70 @@ class ColabStage1Trainer:
                 
                 # 只加载检测器的权重
                 if ckpt is not None:
-                    detector_state = {}
                     state_dict = ckpt['model'] if 'model' in ckpt else ckpt
                     if hasattr(state_dict, 'state_dict'):
                         state_dict = state_dict.state_dict()
-                        
+                    
+                    # 获取模型当前的state_dict作为参考
+                    model_state = model.state_dict()
+                    detector_state = {}
+                    
+                    # 尝试多种匹配策略
+                    # 策略1: 直接匹配detector.*键
                     for k, v in state_dict.items():
                         if not any(module in k for module in ['gat_head', 'emotion_head', 'domain_cls']):
-                            detector_state[f'detector.{k}'] = v
+                            detector_key = f'detector.{k}'
+                            if detector_key in model_state and v.shape == model_state[detector_key].shape:
+                                detector_state[detector_key] = v
                     
-                    model.load_state_dict(detector_state, strict=False)
-                    self.logger.info("Pretrained detector weights loaded successfully")
+                    # 策略2: 如果策略1匹配很少，尝试直接匹配（可能权重已经包含detector前缀）
+                    if len(detector_state) < 10:  # 如果匹配的权重很少
+                        self.logger.warning("Few weights matched with detector prefix, trying direct matching...")
+                        detector_state = {}
+                        for k, v in state_dict.items():
+                            if k.startswith('detector.') and not any(module in k for module in ['gat_head', 'emotion_head', 'domain_cls']):
+                                if k in model_state and v.shape == model_state[k].shape:
+                                    detector_state[k] = v
+                    
+                    # 策略3: 如果仍然匹配很少，尝试去掉detector前缀进行匹配
+                    if len(detector_state) < 10:
+                        self.logger.warning("Still few weights matched, trying without detector prefix...")
+                        detector_state = {}
+                        for k, v in state_dict.items():
+                            # 去掉可能的detector前缀
+                            clean_k = k.replace('detector.', '') if k.startswith('detector.') else k
+                            if not any(module in clean_k for module in ['gat_head', 'emotion_head', 'domain_cls']):
+                                detector_key = f'detector.{clean_k}'
+                                if detector_key in model_state and v.shape == model_state[detector_key].shape:
+                                    detector_state[detector_key] = v
+                    
+                    # 加载权重
+                    if detector_state:
+                        missing_keys, unexpected_keys = model.load_state_dict(detector_state, strict=False)
+                        self.logger.info(f"Pretrained detector weights loaded successfully. Matched {len(detector_state)} layers.")
+                        
+                        # 详细的加载信息
+                        if missing_keys:
+                            self.logger.info(f"Missing keys (will be randomly initialized): {len(missing_keys)}")
+                        if unexpected_keys:
+                            self.logger.info(f"Unexpected keys (ignored): {len(unexpected_keys)}")
+                    else:
+                        self.logger.warning("No compatible weights found! Training from scratch...")
+                        
+                        # 调试信息：显示权重文件中的前几个键
+                        self.logger.debug("Available keys in weight file (first 10):")
+                        for i, k in enumerate(list(state_dict.keys())[:10]):
+                            self.logger.debug(f"  {k}: {state_dict[k].shape}")
+                        
+                        # 显示模型中期望的键
+                        detector_keys = [k for k in model_state.keys() if k.startswith('detector.')]
+                        self.logger.debug(f"Expected detector keys in model (first 10):")
+                        for i, k in enumerate(detector_keys[:10]):
+                            self.logger.debug(f"  {k}: {model_state[k].shape}")
+                        
+                    # 显示匹配统计
+                    total_model_params = len([k for k in model_state.keys() if k.startswith('detector.')])
+                    self.logger.info(f"Weight loading: {len(detector_state)}/{total_model_params} detector layers matched")
                 else:
                     self.logger.warning("No pretrained weights loaded, training from scratch")
             else:
@@ -673,8 +727,8 @@ def main():
     
     config = {
         # 模型配置
-        'model_cfg': str(PROJECT_ROOT / 'code' / 'yolov9' / 'models' / 'detect' / 'yolov9-c.yaml'),
-        'pretrained_weights': 'face_yolov9c.pt',  # 会自动在多个位置查找
+        'model_cfg': 'yolov9c-face-exact.yaml',  # 优先使用修正的配置，回退到标准配置
+        'pretrained_weights': 'yolov9c_face_weights_only.pt',  # 会自动在多个位置查找
         'num_au': 32,
         'num_emotion': 6,
         
