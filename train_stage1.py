@@ -458,7 +458,7 @@ class ColabStage1Trainer:
     
     def process_model_output_for_loss(self, raw_output, is_training=True, debug=False):
         """
-        完善的模型输出处理，确保返回扁平化的张量列表
+        完善的模型输出处理，保持YOLOv9期望的结构
         
         Args:
             raw_output: 模型的原始输出
@@ -466,7 +466,7 @@ class ColabStage1Trainer:
             debug: 是否输出调试信息
             
         Returns:
-            list: 扁平化的torch.Tensor列表，可直接传给ComputeLoss
+            list: 适合ComputeLoss的张量列表，保持原始结构
         """
         if debug:
             self.logger.info(f"Raw output type: {type(raw_output)}")
@@ -495,25 +495,40 @@ class ColabStage1Trainer:
                 if debug:
                     self.logger.info(f"Using tuple[0] as potential_predictions: {type(potential_predictions)}")
         
-        # 步骤3: 扁平化处理（处理可能的嵌套列表）
-        flattened_tensors = self.flatten_nested_tensors(potential_predictions)
+        # 步骤3: 保守的列表处理（不破坏YOLOv9的结构）
+        if isinstance(potential_predictions, list):
+            # 检查是否为嵌套列表
+            if len(potential_predictions) > 0 and isinstance(potential_predictions[0], list):
+                # 只处理第一层嵌套，保持内部结构
+                potential_predictions = potential_predictions[0]
+                if debug:
+                    self.logger.info(f"Unwrapped one layer of nesting, new length: {len(potential_predictions)}")
+            
+            # 确保列表中都是tensor
+            valid_tensors = []
+            for item in potential_predictions:
+                if isinstance(item, torch.Tensor) and hasattr(item, 'view'):
+                    valid_tensors.append(item)
+                elif debug:
+                    self.logger.warning(f"Skipping non-tensor item: {type(item)}")
+            
+            if debug:
+                self.logger.info(f"Final valid tensors count: {len(valid_tensors)}")
+                for i, tensor in enumerate(valid_tensors):
+                    if hasattr(tensor, 'shape'):
+                        self.logger.info(f"  tensor[{i}] shape: {tensor.shape}")
+            
+            return valid_tensors
         
-        if debug:
-            self.logger.info(f"Final flattened tensors count: {len(flattened_tensors)}")
-            for i, tensor in enumerate(flattened_tensors):
-                if hasattr(tensor, 'shape'):
-                    self.logger.info(f"  tensor[{i}] shape: {tensor.shape}")
+        # 步骤4: 如果不是列表，直接返回
+        elif isinstance(potential_predictions, torch.Tensor):
+            if debug:
+                self.logger.info(f"Single tensor output, shape: {potential_predictions.shape}")
+            return [potential_predictions]
         
-        # 步骤4: 验证结果
-        if not flattened_tensors:
-            self.logger.warning("No valid tensors found in model output!")
-            # 如果扁平化失败，尝试直接返回原始输出
-            if isinstance(potential_predictions, list):
-                return potential_predictions
-            else:
-                return [potential_predictions] if hasattr(potential_predictions, 'view') else []
-        
-        return flattened_tensors
+        else:
+            self.logger.warning(f"Unexpected output type: {type(potential_predictions)}")
+            return []
         
     def print_param_stats(self, model):
         """打印参数统计"""
