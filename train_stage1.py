@@ -156,11 +156,19 @@ class ColabStage1Trainer:
         if self.config['pretrained_weights']:
             weights_path = Path(self.config['pretrained_weights'])
             
-            # 如果权重在Drive中
-            if not weights_path.exists() and 'drive' not in str(weights_path):
-                drive_weights = self.drive_save_dir.parent / 'pretrained' / weights_path.name
-                if drive_weights.exists():
-                    weights_path = drive_weights
+            # 按优先级查找权重文件
+            if not weights_path.exists():
+                # 检查多个可能的位置
+                weight_candidates = [
+                    Path('/content') / weights_path.name,                                    # Colab根目录
+                    Path('/content/drive/MyDrive/ASD_AU_weights/pretrained') / weights_path.name,  # Drive位置
+                    self.drive_save_dir.parent / 'pretrained' / weights_path.name,          # 默认Drive位置
+                ]
+                
+                for candidate in weight_candidates:
+                    if candidate.exists():
+                        weights_path = candidate
+                        break
             
             if weights_path.exists():
                 self.logger.info(f"Loading pretrained weights from {weights_path}")
@@ -603,7 +611,7 @@ def main():
     config = {
         # 模型配置
         'model_cfg': str(PROJECT_ROOT / 'code' / 'yolov9' / 'models' / 'detect' / 'yolov9-s.yaml'),
-        'pretrained_weights': 'yolov9-s-face.pt',  # 会自动在Drive中查找
+        'pretrained_weights': 'face_yolov9c.pt',  # 会自动在多个位置查找
         'num_au': 32,
         'num_emotion': 6,
         
