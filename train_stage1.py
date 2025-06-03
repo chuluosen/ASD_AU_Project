@@ -199,6 +199,7 @@ class ColabStage1Trainer:
         
         # 创建YOLOv9模型
         model = Yolov9(cfg=cfg_path, ch=3, nc=1)  # nc=1 for face detection
+        model = model.to(self.device)  # 确保模型在正确的设备上
         
         # 加载预训练权重
         if self.config['pretrained_weights']:
