@@ -191,7 +191,18 @@ class ColabStage1Trainer:
             
             if weights_path.exists():
                 self.logger.info(f"Loading pretrained weights from {weights_path}")
-                ckpt = torch.load(weights_path, map_location=self.device)
+                try:
+                    # 尝试安全加载
+                    ckpt = torch.load(weights_path, map_location=self.device, weights_only=True)
+                except Exception as e1:
+                    self.logger.warning(f"Safe loading failed: {e1}")
+                    try:
+                        # 回退到非安全模式（适用于可信权重文件）
+                        self.logger.info("Attempting to load with weights_only=False (trusted source)")
+                        ckpt = torch.load(weights_path, map_location=self.device, weights_only=False)
+                    except Exception as e2:
+                        self.logger.error(f"Both loading methods failed: {e2}")
+                        raise
                 
                 # 只加载检测器的权重
                 detector_state = {}
