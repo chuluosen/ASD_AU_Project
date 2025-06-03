@@ -567,19 +567,22 @@ class ColabStage1Trainer:
                         for j, p in enumerate(pred):
                             self.logger.info(f"Pred[{j}] type: {type(p)}, content: {p if not isinstance(p, torch.Tensor) else f'Tensor shape: {p.shape}'}")
                 
-                # 如果模型输出是嵌套列表，需要展平
+                # Stage1只训练检测头，需要正确提取检测输出
                 if isinstance(pred, list) and len(pred) > 0:
                     if isinstance(pred[0], list):
-                        # 展平嵌套列表
-                        flattened_pred = []
-                        for sublist in pred:
-                            if isinstance(sublist, list):
-                                flattened_pred.extend([item for item in sublist if isinstance(item, torch.Tensor)])
-                            elif isinstance(sublist, torch.Tensor):
-                                flattened_pred.append(sublist)
-                        pred = flattened_pred
+                        # 对于嵌套列表，只取第一个子列表（检测头输出）
+                        detection_pred = pred[0] if isinstance(pred[0], list) else [pred[0]]
+                        # 确保都是张量
+                        detection_pred = [item for item in detection_pred if isinstance(item, torch.Tensor)]
+                        pred = detection_pred
                         if i == 0:
-                            self.logger.info(f"Flattened to {len(pred)} tensors")
+                            self.logger.info(f"Stage1: Using only detection outputs, {len(pred)} tensors")
+                    else:
+                        # 如果不是嵌套列表，假设前3个张量是检测输出（通常是3个尺度）
+                        detection_pred = [item for item in pred[:3] if isinstance(item, torch.Tensor)]
+                        pred = detection_pred
+                        if i == 0:
+                            self.logger.info(f"Stage1: Using first 3 tensors as detection outputs")
                 
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
