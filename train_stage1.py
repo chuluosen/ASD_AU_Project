@@ -47,16 +47,27 @@ def setup_colab_env():
     drive_save_dir = Path('/content/drive/MyDrive/ASD_AU_weights/stage1')
     drive_save_dir.mkdir(parents=True, exist_ok=True)
     
-    # 检查数据划分脚本的输出
-    yolo_data_path = Path('/content/yolo_data')
-    if yolo_data_path.exists():
-        print(f"✅ Found dataset from split script at: {yolo_data_path}")
-        # 显示数据统计
-        for split in ['train', 'val', 'test']:
-            img_dir = yolo_data_path / 'images' / split
-            if img_dir.exists():
-                img_count = len(list(img_dir.glob('*')))
-                print(f"   {split:5s}: {img_count:,} images")
+    # 检查数据划分脚本的输出（支持嵌套路径）
+    data_candidates = [
+        Path('/content/yolo_data/yolo_data'),  # 用户当前的实际路径
+        Path('/content/yolo_data'),            # 标准路径
+    ]
+    
+    found_data = False
+    for yolo_data_path in data_candidates:
+        if yolo_data_path.exists() and (yolo_data_path / 'images').exists():
+            print(f"✅ Found dataset at: {yolo_data_path}")
+            # 显示数据统计
+            for split in ['train', 'val', 'test']:
+                img_dir = yolo_data_path / 'images' / split
+                if img_dir.exists():
+                    img_count = len(list(img_dir.glob('*')))
+                    print(f"   {split:5s}: {img_count:,} images")
+            found_data = True
+            break
+    
+    if not found_data:
+        print("⚠️  No dataset found in expected locations")
     
     return project_root, drive_save_dir
 
@@ -346,7 +357,8 @@ class ColabStage1Trainer:
         """设置数据路径（兼容用户的数据划分脚本）"""
         # 按优先级检查数据路径
         data_candidates = [
-            Path('/content/yolo_data'),                                    # 用户划分脚本的默认输出
+            Path('/content/yolo_data/yolo_data'),                         # 用户当前的实际路径
+            Path('/content/yolo_data'),                                    # 用户划分脚本的标准输出
             Path('/content/drive/MyDrive/datasets/HDA-SynChild'),         # Drive标准位置
             Path('/content/datasets/HDA-SynChild'),                       # 本地位置
         ]
@@ -355,8 +367,8 @@ class ColabStage1Trainer:
             if data_root.exists() and (data_root / 'images' / 'train').exists():
                 self.logger.info(f"Found dataset at: {data_root}")
                 
-                # 如果数据在临时位置，创建符号链接到标准位置优化访问
-                if str(data_root) == '/content/yolo_data':
+                # 如果数据在嵌套位置，创建符号链接到标准位置优化访问
+                if str(data_root) in ['/content/yolo_data', '/content/yolo_data/yolo_data']:
                     standard_path = Path('/content/datasets/HDA-SynChild')
                     standard_path.parent.mkdir(exist_ok=True)
                     if not standard_path.exists():
