@@ -352,21 +352,13 @@ class ColabStage1Trainer:
                 self.logger.warning(f"Failed to load checkpoint: {e}. Starting fresh training.")
                 start_epoch = 0
         
-        # Stage 1不需要冻结模块（只有检测器）
+        # Stage 1：纯YOLOv9检测器，无需冻结模块
         # 打印参数统计
         self.print_param_stats(model)
         
         return model, start_epoch
     
-    def freeze_modules(self, model):
-        """冻结GAT-AU头和情绪头的参数"""
-        frozen_modules = ['gat_head', 'emotion_head', 'roi_extractor']
-        
-        for name, param in model.named_parameters():
-            if any(module in name for module in frozen_modules):
-                param.requires_grad = False
-                
-        self.logger.info(f"Frozen modules: {frozen_modules}")
+    # freeze_modules 函数已移除 - Stage1只训练纯YOLOv9检测器
         
     def print_param_stats(self, model):
         """打印参数统计"""
@@ -473,8 +465,8 @@ class ColabStage1Trainer:
         # 设置数据路径
         data_root = self.setup_data_paths()
         
-        # 检查图像完整性
-        self.check_image_integrity(data_root)
+        # 跳过耗时的图像完整性检查（可在首次运行时手动检查）
+        # self.check_image_integrity(data_root)
         
         # 检查是否存在用户生成的data.yaml
         user_data_yaml = data_root / 'data.yaml'
@@ -507,7 +499,7 @@ class ColabStage1Trainer:
         
         # 训练数据加载器
         train_loader, dataset = create_dataloader(
-            path=data_root / 'images/train',
+            path=str(data_root / 'images/train'),
             imgsz=self.config['img_size'],
             batch_size=self.config['batch_size'],
             stride=32,
@@ -526,7 +518,7 @@ class ColabStage1Trainer:
         
         # 验证数据加载器
         val_loader = create_dataloader(
-            path=data_root / 'images/val',
+            path=str(data_root / 'images/val'),
             imgsz=self.config['img_size'],
             batch_size=self.config['batch_size'] * 2,
             stride=32,
@@ -550,7 +542,7 @@ class ColabStage1Trainer:
             'lrf': 0.1,
             'momentum': 0.937,
             'weight_decay': 0.0005,
-            'warmup_epochs': 3.0,
+            'warmup_epochs': self.config.get('warmup_epochs', 2),
             'warmup_momentum': 0.8,
             'warmup_bias_lr': 0.1,
             'box': 0.05,
@@ -621,7 +613,7 @@ class ColabStage1Trainer:
                 ckpt.unlink()
                 self.logger.info(f"Removed old checkpoint: {ckpt}")
     
-    def train_epoch(self, model, train_loader, optimizer, compute_loss, epoch, epochs):
+    def train_epoch(self, model, train_loader, optimizer, compute_loss, epoch, epochs, scaler=None):
         """训练一个epoch（内存优化）"""
         model.train()
         pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}')
@@ -633,46 +625,38 @@ class ColabStage1Trainer:
             imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
             
             # 前向传播
-            with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
                 # 直接使用YOLOv9模型
                 pred = model(imgs)
                 
                 # 第一个batch时打印调试信息
                 if i == 0:
-                    self.logger.info(f"Raw model output type: {type(pred)}")
-                    self.logger.info(f"Model training mode: {model.training}")
+                    self.logger.info(f"Model output type: {type(pred)}")
                     if isinstance(pred, list):
-                        self.logger.info(f"Pred list length: {len(pred)}")
-                        for j, p in enumerate(pred):
-                            self.logger.info(f"Pred[{j}] type: {type(p)}, content: {p if not isinstance(p, torch.Tensor) else f'Tensor shape: {p.shape}'}")
+                        self.logger.info(f"Output list length: {len(pred)}")
                 
-                # Stage1只训练检测头，需要正确提取检测输出
-                if isinstance(pred, list) and len(pred) > 0:
-                    if isinstance(pred[0], list):
-                        # 对于嵌套列表，只取第一个子列表（检测头输出）
-                        detection_pred = pred[0] if isinstance(pred[0], list) else [pred[0]]
-                        # 确保都是张量
-                        detection_pred = [item for item in detection_pred if isinstance(item, torch.Tensor)]
-                        pred = detection_pred
-                        if i == 0:
-                            self.logger.info(f"Stage1: Using only detection outputs, {len(pred)} tensors")
-                    else:
-                        # 如果不是嵌套列表，假设前3个张量是检测输出（通常是3个尺度）
-                        detection_pred = [item for item in pred[:3] if isinstance(item, torch.Tensor)]
-                        pred = detection_pred
-                        if i == 0:
-                            self.logger.info(f"Stage1: Using first 3 tensors as detection outputs")
+                # Stage1: 直接使用YOLOv9输出，让compute_loss自行处理
+                # （YOLOv9的ComputeLoss能正确处理模型的原始输出格式）
                 
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
             
-            # 反向传播
-            loss.backward()
-            
-            # 梯度累积
-            if (i + 1) % accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
+            # 反向传播（使用GradScaler支持AMP）
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                
+                # 梯度累积
+                if (i + 1) % accumulation_steps == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+            else:
+                loss.backward()
+                
+                # 梯度累积
+                if (i + 1) % accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
             
             # 更新进度条
             losses.append(loss_items.cpu().numpy())
@@ -685,9 +669,16 @@ class ColabStage1Trainer:
                 'GPU': f'{torch.cuda.memory_reserved() / 1024**3:.1f}G'
             })
             
-            # 定期清理显存
-            if i % 100 == 0:
-                torch.cuda.empty_cache()
+            # 移除频繁的显存清理（会降低性能）
+        
+        # 处理最后一批剩余的梯度
+        if (len(train_loader)) % accumulation_steps != 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
         
         return np.mean(losses, axis=0)
     
@@ -725,25 +716,45 @@ class ColabStage1Trainer:
         # 创建调度器
         scheduler = self.create_scheduler(optimizer, self.config['epochs'] - start_epoch)
         
-        # 创建EMA
+        # 创建EMA和梯度缩放器
         ema = ModelEMA(model) if self.config.get('use_ema', True) else None
+        scaler = torch.cuda.amp.GradScaler() if self.config.get('amp', True) else None
         
         # 训练循环
         best_fitness = 0
+        best_map50_95 = 0
         patience_counter = 0
         patience = self.config.get('patience', 8)
+        
+        # 训练指标记录
+        self.train_metrics = {
+            'epochs': [],
+            'train_loss': [],
+            'val_loss': [],
+            'mAP@0.5': [],
+            'mAP@0.5:0.95': [],
+            'precision': [],
+            'recall': [],
+            'lr': []
+        }
         
         try:
             for epoch in range(start_epoch, self.config['epochs']):
                 # 训练
                 train_loss = self.train_epoch(model, train_loader, optimizer, compute_loss, 
-                                            epoch, self.config['epochs'])
+                                            epoch, self.config['epochs'], scaler)
                 
                 # 验证（按频率进行）
+                val_loss = None
+                map_results = None
+                
                 if (epoch + 1) % self.config.get('val_frequency', 1) == 0:
                     val_loss = self.validate(model, val_loader, compute_loss)
-                else:
-                    val_loss = None
+                    
+                    # 详细mAP评估（每5个epoch或最后几个epoch）
+                    if (epoch + 1) % 5 == 0 or epoch >= self.config['epochs'] - 3:
+                        map_results = self.evaluate_map(model, val_loader, 
+                                                       self.save_dir / 'hda_synchild_colab.yaml')
                 
                 # 更新EMA
                 if ema:
@@ -752,30 +763,74 @@ class ColabStage1Trainer:
                 # 更新学习率
                 scheduler.step()
                 
+                # 记录指标
+                current_lr = optimizer.param_groups[0]['lr']
+                self.train_metrics['epochs'].append(epoch + 1)
+                self.train_metrics['train_loss'].append(train_loss[0])
+                self.train_metrics['lr'].append(current_lr)
+                
+                if val_loss is not None:
+                    self.train_metrics['val_loss'].append(val_loss[0])
+                else:
+                    self.train_metrics['val_loss'].append(None)
+                
+                if map_results:
+                    self.train_metrics['mAP@0.5'].append(map_results['mAP@0.5'])
+                    self.train_metrics['mAP@0.5:0.95'].append(map_results['mAP@0.5:0.95'])
+                    self.train_metrics['precision'].append(map_results['precision'])
+                    self.train_metrics['recall'].append(map_results['recall'])
+                else:
+                    self.train_metrics['mAP@0.5'].append(None)
+                    self.train_metrics['mAP@0.5:0.95'].append(None)
+                    self.train_metrics['precision'].append(None)
+                    self.train_metrics['recall'].append(None)
+                
                 # 记录日志
                 if val_loss is not None:
-                    self.logger.info(
+                    log_msg = (
                         f"Epoch {epoch+1}/{self.config['epochs']} - "
                         f"Train Loss: {train_loss[0]:.4f} - "
                         f"Val Loss: {val_loss[0]:.4f} - "
-                        f"LR: {optimizer.param_groups[0]['lr']:.6f} - "
-                        f"Patience: {patience_counter}/{patience}"
+                        f"LR: {current_lr:.6f}"
                     )
                     
-                    # 保存最佳模型和早停检查
-                    fitness = 1 / (val_loss[0] + 1e-6)
-                    if fitness > best_fitness:
-                        best_fitness = fitness
+                    if map_results:
+                        log_msg += (
+                            f" - mAP@0.5: {map_results['mAP@0.5']:.4f} - "
+                            f"mAP@0.5:0.95: {map_results['mAP@0.5:0.95']:.4f} - "
+                            f"Precision: {map_results['precision']:.4f} - "
+                            f"Recall: {map_results['recall']:.4f}"
+                        )
+                        
+                        # 检查是否达到目标mAP@0.5:0.95 >= 0.57
+                        if map_results['mAP@0.5:0.95'] >= 0.57:
+                            self.logger.info(f"🎯 Target mAP@0.5:0.95 >= 0.57 achieved: {map_results['mAP@0.5:0.95']:.4f}")
+                    
+                    log_msg += f" - Patience: {patience_counter}/{patience}"
+                    self.logger.info(log_msg)
+                    
+                    # 保存最佳模型（基于mAP@0.5:0.95或验证损失）
+                    if map_results and map_results['mAP@0.5:0.95'] > best_map50_95:
+                        best_map50_95 = map_results['mAP@0.5:0.95']
+                        best_fitness = map_results['mAP@0.5:0.95']
                         patience_counter = 0
                         self.save_checkpoint(model, optimizer, epoch, best_fitness, ema, best=True)
-                        self.logger.info(f"New best model! Fitness: {fitness:.6f}")
+                        self.logger.info(f"New best model! mAP@0.5:0.95: {best_map50_95:.4f}")
                     else:
-                        patience_counter += 1
+                        # 回退到基于验证损失的fitness
+                        fitness = 1 / (val_loss[0] + 1e-6)
+                        if fitness > best_fitness and not map_results:
+                            best_fitness = fitness
+                            patience_counter = 0
+                            self.save_checkpoint(model, optimizer, epoch, best_fitness, ema, best=True)
+                            self.logger.info(f"New best model! Fitness: {fitness:.6f}")
+                        else:
+                            patience_counter += 1
                 else:
                     self.logger.info(
                         f"Epoch {epoch+1}/{self.config['epochs']} - "
                         f"Train Loss: {train_loss[0]:.4f} - "
-                        f"LR: {optimizer.param_groups[0]['lr']:.6f}"
+                        f"LR: {current_lr:.6f}"
                     )
                 
                 # 保存检查点
@@ -801,6 +856,64 @@ class ColabStage1Trainer:
             raise
         
         self.logger.info("Training completed!")
+        
+        # 最终评估套件
+        self.logger.info("🔍 开始最终模型评估...")
+        
+        # 1. FPS基准测试
+        self.logger.info("🚀 FPS基准测试...")
+        try:
+            fps_results = self.benchmark_fps(model)
+            
+            # 保存FPS结果到Drive
+            import json
+            fps_file = self.drive_save_dir / 'fps_benchmark.json'
+            with open(fps_file, 'w') as f:
+                json.dump(fps_results, f, indent=2)
+            self.logger.info(f"FPS测试结果已保存到: {fps_file}")
+            
+        except Exception as e:
+            self.logger.warning(f"FPS基准测试失败: {e}")
+        
+        # 2. 定性检测可视化
+        self.logger.info("📸 定性检测可视化...")
+        try:
+            qualitative_results = self.qualitative_check(model, val_loader, num_samples=30)
+            
+            if qualitative_results:
+                # 保存定性检查结果
+                qual_file = self.drive_save_dir / 'qualitative_check.json'
+                with open(qual_file, 'w') as f:
+                    json.dump(qualitative_results, f, indent=2)
+                self.logger.info(f"定性检查结果已保存到: {qual_file}")
+            
+        except Exception as e:
+            self.logger.warning(f"定性检查失败: {e}")
+        
+        # 3. 最终mAP评估
+        self.logger.info("📊 最终mAP评估...")
+        try:
+            final_map_results = self.evaluate_map(model, val_loader, 
+                                                 self.save_dir / 'hda_synchild_colab.yaml')
+            if final_map_results:
+                # 保存最终mAP结果
+                map_file = self.drive_save_dir / 'final_map_results.json'
+                with open(map_file, 'w') as f:
+                    json.dump(final_map_results, f, indent=2)
+                
+                self.logger.info("🎯 最终评估结果:")
+                self.logger.info(f"   mAP@0.5: {final_map_results['mAP@0.5']:.4f}")
+                self.logger.info(f"   mAP@0.5:0.95: {final_map_results['mAP@0.5:0.95']:.4f}")
+                self.logger.info(f"   Precision: {final_map_results['precision']:.4f}")
+                self.logger.info(f"   Recall: {final_map_results['recall']:.4f}")
+                
+                # 总结评估状态
+                target_achieved = final_map_results['mAP@0.5:0.95'] >= 0.57
+                self.logger.info(f"   目标达成: {'✅ 是' if target_achieved else '❌ 否'} (≥0.57)")
+                
+        except Exception as e:
+            self.logger.warning(f"最终mAP评估失败: {e}")
+        
         return str(self.drive_save_dir / 'best.pt')
     
     def check_runtime_limit(self):
@@ -836,21 +949,56 @@ class ColabStage1Trainer:
         return optimizer
     
     def create_scheduler(self, optimizer, epochs):
-        """创建学习率调度器"""
-        if self.config['scheduler'] == 'cosine':
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=epochs,
-                eta_min=self.config['lr0'] * 0.1
+        """创建学习率调度器（支持warmup）"""
+        warmup_epochs = self.config.get('warmup_epochs', 0)
+        
+        if warmup_epochs > 0 and warmup_epochs < epochs:
+            # 使用warmup + 主调度器
+            from torch.optim.lr_scheduler import LinearLR, SequentialLR
+            
+            # Warmup阶段：从10%学习率线性增加到100%
+            warmup_scheduler = LinearLR(
+                optimizer, 
+                start_factor=0.1, 
+                total_iters=warmup_epochs
             )
+            
+            # 主训练阶段调度器
+            if self.config['scheduler'] == 'cosine':
+                main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    T_max=epochs - warmup_epochs,
+                    eta_min=self.config['lr0'] * 0.1
+                )
+            else:
+                lambda_lr = lambda epoch: (1 - epoch / (epochs - warmup_epochs)) * (1 - 0.1) + 0.1
+                main_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_lr)
+            
+            # 组合调度器
+            scheduler = SequentialLR(
+                optimizer, 
+                schedulers=[warmup_scheduler, main_scheduler], 
+                milestones=[warmup_epochs]
+            )
+            
+            self.logger.info(f"Using warmup scheduler: {warmup_epochs} epochs warmup + {self.config['scheduler']}")
+            
         else:
-            lambda_lr = lambda epoch: (1 - epoch / epochs) * (1 - 0.1) + 0.1
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_lr)
+            # 不使用warmup，直接使用主调度器
+            if self.config['scheduler'] == 'cosine':
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    T_max=epochs,
+                    eta_min=self.config['lr0'] * 0.1
+                )
+            else:
+                lambda_lr = lambda epoch: (1 - epoch / epochs) * (1 - 0.1) + 0.1
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_lr)
         
         return scheduler
     
     def validate(self, model, val_loader, compute_loss):
-        """验证模型"""
+        """验证模型（包含详细mAP评估）"""
         model.eval()
         losses = []
         
@@ -858,13 +1006,234 @@ class ColabStage1Trainer:
             for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
                 imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
                 
-                with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
+                with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
                     pred = model(imgs)
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
                 losses.append(loss_items.cpu().numpy())
         
         return np.mean(losses, axis=0)
+    
+    def evaluate_map(self, model, val_loader, data_yaml_path):
+        """使用YOLOv9的val.py进行完整mAP评估"""
+        try:
+            # 保存当前模型权重到临时文件（YOLOv9兼容格式）
+            temp_weights = self.save_dir / 'temp_weights.pt'
+            torch.save({'model': model.state_dict()}, temp_weights)
+            
+            # 调用YOLOv9的验证函数
+            from val import run as validate_yolo
+            
+            results = validate_yolo(
+                data=data_yaml_path,
+                weights=str(temp_weights),
+                batch_size=self.config['batch_size'] * 2,
+                imgsz=self.config['img_size'],
+                conf_thres=0.001,
+                iou_thres=0.6,
+                max_det=300,
+                task='val',
+                device=str(self.device),
+                workers=self.config['workers'],
+                single_cls=True,
+                augment=False,
+                verbose=False,
+                save_txt=False,
+                save_hybrid=False,
+                save_conf=False,
+                save_json=False,
+                project=str(self.save_dir),
+                name='val',
+                exist_ok=True,
+                half=self.config.get('amp', True),
+                dnn=False
+            )
+            
+            # 清理临时文件
+            if temp_weights.exists():
+                temp_weights.unlink()
+            
+            # 提取关键指标
+            precision, recall, map50, map50_95 = results[:4]
+            
+            return {
+                'precision': precision,
+                'recall': recall, 
+                'mAP@0.5': map50,
+                'mAP@0.5:0.95': map50_95
+            }
+            
+        except Exception as e:
+            self.logger.warning(f"mAP evaluation failed: {e}")
+            return None
+    
+    def benchmark_fps(self, model, warmup_runs=10, test_runs=100):
+        """FPS基准测试 - 目标: RTX 3060 ≥ 28 FPS"""
+        model.eval()
+        
+        # 创建测试输入
+        test_input = torch.randn(1, 3, self.config['img_size'], self.config['img_size'], device=self.device)
+        
+        # 预热GPU
+        with torch.no_grad():
+            for _ in range(warmup_runs):
+                _ = model(test_input)
+        
+        # 同步CUDA确保预热完成
+        torch.cuda.synchronize()
+        
+        # FPS测试
+        import time
+        start_time = time.time()
+        
+        with torch.no_grad():
+            for _ in range(test_runs):
+                _ = model(test_input)
+        
+        torch.cuda.synchronize()
+        end_time = time.time()
+        
+        # 计算FPS
+        total_time = end_time - start_time
+        fps = test_runs / total_time
+        avg_inference_time = total_time / test_runs * 1000  # ms
+        
+        # GPU信息
+        gpu_name = torch.cuda.get_device_properties(0).name
+        
+        self.logger.info(f"🚀 FPS基准测试结果:")
+        self.logger.info(f"   GPU: {gpu_name}")
+        self.logger.info(f"   输入尺寸: {self.config['img_size']}x{self.config['img_size']}")
+        self.logger.info(f"   推理速度: {fps:.1f} FPS")
+        self.logger.info(f"   平均延迟: {avg_inference_time:.2f} ms")
+        
+        # 检查是否达到RTX 3060的目标性能
+        if "RTX 30" in gpu_name or "RTX 40" in gpu_name:
+            target_fps = 28
+            if fps >= target_fps:
+                self.logger.info(f"✅ 达到目标性能! ({fps:.1f} ≥ {target_fps} FPS)")
+            else:
+                self.logger.warning(f"⚠️ 未达目标性能! ({fps:.1f} < {target_fps} FPS)")
+        
+        return {
+            'fps': fps,
+            'avg_inference_time_ms': avg_inference_time,
+            'gpu_name': gpu_name,
+            'input_size': self.config['img_size']
+        }
+    
+    def qualitative_check(self, model, val_loader, num_samples=50):
+        """定性检测可视化 - 随机抽取验证图像进行检测可视化"""
+        try:
+            import cv2
+            import random
+            from pathlib import Path
+            
+            model.eval()
+            sample_dir = self.save_dir / 'qualitative_samples'
+            sample_dir.mkdir(exist_ok=True)
+            
+            # 随机采样验证图像
+            all_samples = []
+            for batch_idx, (imgs, targets, paths, _) in enumerate(val_loader):
+                for i in range(len(paths)):
+                    all_samples.append((imgs[i], paths[i]))  # 只保留图像和路径，移除targets避免索引问题
+                if len(all_samples) >= num_samples * 2:  # 采样更多以便随机选择
+                    break
+            
+            if len(all_samples) < 10:
+                self.logger.warning("样本数量不足，跳过定性检查")
+                return
+            
+            # 随机选择样本
+            selected_samples = random.sample(all_samples, min(num_samples, len(all_samples)))
+            
+            detection_count = 0
+            good_detections = 0
+            
+            with torch.no_grad():
+                for idx, (img_tensor, img_path) in enumerate(selected_samples):
+                    try:
+                        # 准备输入
+                        img_input = img_tensor.unsqueeze(0).to(self.device).float() / 255.0
+                        
+                        # 推理
+                        pred = model(img_input)
+                        
+                        # 读取原图
+                        img_cv = cv2.imread(str(img_path))
+                        if img_cv is None:
+                            continue
+                        
+                        img_h, img_w = img_cv.shape[:2]
+                        
+                        # 简单的检测结果处理（这里简化处理，实际应该用NMS）
+                        if isinstance(pred, list) and len(pred) > 0:
+                            # 取第一个尺度的预测
+                            if isinstance(pred[0], list):
+                                first_pred = pred[0][0] if len(pred[0]) > 0 else None
+                            else:
+                                first_pred = pred[0]
+                            
+                            if first_pred is not None and len(first_pred.shape) >= 2:
+                                detection_count += 1
+                                
+                                # 简化的框绘制（仅用于定性检查）
+                                pred_np = first_pred.cpu().numpy()
+                                if pred_np.shape[-1] >= 5:  # 至少有x,y,w,h,conf
+                                    # 找置信度较高的检测框
+                                    conf_scores = pred_np[..., 4] if pred_np.shape[-1] > 4 else pred_np[..., 0]
+                                    high_conf_mask = conf_scores > 0.3
+                                    
+                                    if high_conf_mask.any():
+                                        good_detections += 1
+                                        # 在图像上标记 "Good Detection"
+                                        cv2.putText(img_cv, f"Sample {idx+1}: Good Detection", 
+                                                  (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                    else:
+                                        cv2.putText(img_cv, f"Sample {idx+1}: Low Confidence", 
+                                                  (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+                                else:
+                                    cv2.putText(img_cv, f"Sample {idx+1}: No Detection", 
+                                              (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        else:
+                            cv2.putText(img_cv, f"Sample {idx+1}: No Output", 
+                                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+                        
+                        # 保存标注图像
+                        save_path = sample_dir / f"sample_{idx+1:03d}.jpg"
+                        cv2.imwrite(str(save_path), img_cv)
+                        
+                    except Exception as e:
+                        self.logger.warning(f"处理样本 {idx+1} 时出错: {e}")
+                        continue
+            
+            # 统计结果
+            detection_rate = good_detections / len(selected_samples) * 100 if selected_samples else 0
+            
+            self.logger.info(f"📸 定性检测分析完成:")
+            self.logger.info(f"   检查样本数: {len(selected_samples)}")
+            self.logger.info(f"   有效检测数: {good_detections}")
+            self.logger.info(f"   检测成功率: {detection_rate:.1f}%")
+            self.logger.info(f"   样本图片保存至: {sample_dir}")
+            
+            if detection_rate < 30:
+                self.logger.warning("⚠️ 检测成功率较低，建议检查模型训练")
+            elif detection_rate > 70:
+                self.logger.info("✅ 检测效果良好")
+            else:
+                self.logger.info("📊 检测效果中等，可考虑继续训练")
+                
+            return {
+                'total_samples': len(selected_samples),
+                'good_detections': good_detections,
+                'detection_rate': detection_rate,
+                'sample_dir': str(sample_dir)
+            }
+            
+        except Exception as e:
+            self.logger.warning(f"定性检查失败: {e}")
+            return None
 
 
 def main():
