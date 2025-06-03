@@ -634,9 +634,22 @@ class ColabStage1Trainer:
                     self.logger.info(f"Model output type: {type(pred)}")
                     if isinstance(pred, list):
                         self.logger.info(f"Output list length: {len(pred)}")
+                        for j, p in enumerate(pred):
+                            self.logger.info(f"pred[{j}] type: {type(p)}, shape/len: {p.shape if hasattr(p, 'shape') else len(p) if isinstance(p, list) else 'unknown'}")
                 
-                # Stage1: 直接使用YOLOv9输出，让compute_loss自行处理
-                # （YOLOv9的ComputeLoss能正确处理模型的原始输出格式）
+                # Stage1: 处理模型输出格式 - 确保输出是tensor列表而不是嵌套列表
+                if isinstance(pred, list) and len(pred) > 0:
+                    # 检查是否为嵌套列表（训练模式下可能返回 [detection_outputs, aux_outputs]）
+                    if isinstance(pred[0], list):
+                        # 取第一个子列表作为检测输出
+                        pred = pred[0]
+                        if i == 0:
+                            self.logger.info(f"Using nested list[0] as detection output, length: {len(pred)}")
+                    
+                    # 确保所有元素都是tensor
+                    pred = [p for p in pred if hasattr(p, 'view')]  # 只保留tensor
+                    if i == 0:
+                        self.logger.info(f"Final prediction tensors: {len(pred)}")
                 
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
@@ -718,7 +731,7 @@ class ColabStage1Trainer:
         
         # 创建EMA和梯度缩放器
         ema = ModelEMA(model) if self.config.get('use_ema', True) else None
-        scaler = torch.cuda.amp.GradScaler() if self.config.get('amp', True) else None
+        scaler = torch.amp.GradScaler('cuda') if self.config.get('amp', True) else None
         
         # 训练循环
         best_fitness = 0
