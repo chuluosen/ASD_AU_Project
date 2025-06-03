@@ -229,15 +229,18 @@ class ColabStage1Trainer:
         
     def check_resume(self):
         """检查是否需要恢复训练"""
-        checkpoint_pattern = self.drive_save_dir / 'checkpoint_epoch_*.pt'
         checkpoints = list(self.drive_save_dir.glob('checkpoint_epoch_*.pt'))
         
-        if checkpoints:
+        # 过滤出真正存在的文件
+        existing_checkpoints = [ckpt for ckpt in checkpoints if ckpt.exists()]
+        
+        if existing_checkpoints:
             # 找到最新的checkpoint
-            latest_checkpoint = max(checkpoints, key=lambda p: int(p.stem.split('_')[-1]))
+            latest_checkpoint = max(existing_checkpoints, key=lambda p: int(p.stem.split('_')[-1]))
             self.logger.info(f"Found checkpoint: {latest_checkpoint}")
             self.config['resume'] = str(latest_checkpoint)
         else:
+            self.logger.info("No valid checkpoints found, starting fresh training")
             self.config['resume'] = None
     
     def setup_logging(self):
