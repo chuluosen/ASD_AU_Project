@@ -403,13 +403,22 @@ class ColabStage1Trainer:
                 checkpoint_keys = set(checkpoint['model_state_dict'].keys())
                 model_keys = set(model.state_dict().keys())
                 
-                # 如果checkpoint包含GAT/emotion组件，说明是旧的包装模型，跳过
+                # 如果checkpoint包含GAT/emotion组件，说明是旧的包装模型，尝试部分加载
                 has_old_components = any(key.startswith(('gat_head', 'emotion_head', 'roi_extractor')) 
                                        for key in checkpoint_keys)
                 
                 if has_old_components:
-                    self.logger.warning("Checkpoint contains old model architecture (Y9_GAT_DA). Starting fresh training with new YOLOv9-only architecture.")
-                    start_epoch = 0
+                    self.logger.warning("Checkpoint contains old model architecture (Y9_GAT_DA). Attempting partial weight loading...")
+                    # 只加载YOLOv9部分的权重
+                    yolo_weights = {k.replace('detector.', ''): v for k, v in checkpoint['model_state_dict'].items() 
+                                   if k.startswith('detector.') or not any(comp in k for comp in ['gat_head', 'emotion_head', 'roi_extractor'])}
+                    
+                    if yolo_weights:
+                        missing_keys, unexpected_keys = model.load_state_dict(yolo_weights, strict=False)
+                        start_epoch = checkpoint['epoch'] + 1
+                        self.logger.info(f"Partially resumed from epoch {start_epoch} (YOLOv9 weights only)")
+                    else:
+                        start_epoch = 0
                 else:
                     # 兼容的checkpoint，可以恢复
                     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
