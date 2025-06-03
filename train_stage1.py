@@ -47,21 +47,24 @@ def setup_colab_env():
     drive_save_dir = Path('/content/drive/MyDrive/ASD_AU_weights/stage1')
     drive_save_dir.mkdir(parents=True, exist_ok=True)
     
-    # 清理缓存避免损坏文件问题
-    print("Cleaning cache files...")
-    cache_patterns = [
-        '/content/ASD_AU_Project/**/*.cache',
-        '/tmp/*.cache',
-        '/content/**/*.cache'
-    ]
-    import glob
-    for pattern in cache_patterns:
-        for cache_file in glob.glob(pattern, recursive=True):
-            try:
+    # 清理缓存避免损坏文件问题（轻量级）
+    print("Cleaning recent cache files...")
+    try:
+        # 只清理明确知道的缓存位置
+        cache_files = [
+            '/content/ASD_AU_Project/train.cache',
+            '/content/ASD_AU_Project/val.cache',
+            '/tmp/train.cache',
+            '/tmp/val.cache'
+        ]
+        cache_count = 0
+        for cache_file in cache_files:
+            if os.path.exists(cache_file):
                 os.remove(cache_file)
-                print(f"Removed cache: {cache_file}")
-            except:
-                pass
+                cache_count += 1
+        print(f"Cleaned {cache_count} cache files")
+    except Exception as e:
+        print(f"Cache cleaning skipped: {e}")
     
     # 检查数据划分脚本的输出（支持嵌套路径）
     data_candidates = [
