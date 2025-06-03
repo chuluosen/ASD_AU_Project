@@ -587,6 +587,10 @@ class ColabStage1Trainer:
         # 创建数据加载器
         train_loader, val_loader, dataset = self.create_dataloaders()
         
+        # 添加超参数到检测器模型（损失函数需要）
+        hyp = self.get_hyp_dict()
+        model.detector.hyp = hyp
+        
         # 创建损失函数
         compute_loss = ComputeLoss(model.detector)
         
