@@ -673,7 +673,7 @@ def main():
     
     config = {
         # 模型配置
-        'model_cfg': str(PROJECT_ROOT / 'code' / 'yolov9' / 'models' / 'detect' / 'yolov9-s.yaml'),
+        'model_cfg': str(PROJECT_ROOT / 'code' / 'yolov9' / 'models' / 'detect' / 'yolov9-c.yaml'),
         'pretrained_weights': 'face_yolov9c.pt',  # 会自动在多个位置查找
         'num_au': 32,
         'num_emotion': 6,
