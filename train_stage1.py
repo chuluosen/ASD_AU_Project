@@ -549,8 +549,20 @@ class ColabStage1Trainer:
             imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
             
             # 前向传播
-            with torch.cuda.amp.autocast(enabled=self.config.get('amp', True)):
+            with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
                 pred = model.detector(imgs)
+                
+                # 确保pred是正确的格式（应该是张量列表）
+                if isinstance(pred, list) and len(pred) > 0 and isinstance(pred[0], list):
+                    # 如果是嵌套列表，展平为张量列表
+                    pred = [item for sublist in pred for item in (sublist if isinstance(sublist, list) else [sublist])]
+                elif not isinstance(pred, list):
+                    # 如果不是列表，转换为列表
+                    pred = [pred] if pred is not None else []
+                
+                # 确保每个元素都是张量
+                pred = [p for p in pred if isinstance(p, torch.Tensor)]
+                
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
             
@@ -728,8 +740,20 @@ class ColabStage1Trainer:
             for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
                 imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
                 
-                with torch.cuda.amp.autocast(enabled=self.config.get('amp', True)):
+                with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
                     pred = model.detector(imgs)
+                    
+                    # 确保pred是正确的格式（应该是张量列表）
+                    if isinstance(pred, list) and len(pred) > 0 and isinstance(pred[0], list):
+                        # 如果是嵌套列表，展平为张量列表
+                        pred = [item for sublist in pred for item in (sublist if isinstance(sublist, list) else [sublist])]
+                    elif not isinstance(pred, list):
+                        # 如果不是列表，转换为列表
+                        pred = [pred] if pred is not None else []
+                    
+                    # 确保每个元素都是张量
+                    pred = [p for p in pred if isinstance(p, torch.Tensor)]
+                    
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
                 losses.append(loss_items.cpu().numpy())
