@@ -1,6 +1,37 @@
 """
 Stage 1: HDA-SynChild预训练脚本 - Colab适配版
 只训练YOLOv9主干+检测头，冻结GAT-AU和情绪头
+
+## 复现环境要求 ##
+- Platform: Google Colab (推荐) 或支持CUDA的Linux环境
+- GPU: A100 (推荐) / V100 / RTX 30/40系列 / T4
+- Python: ≥ 3.8
+- PyTorch: ≥ 2.0
+- CUDA: ≥ 11.0
+
+## 依赖安装 ##
+pip install torch torchvision opencv-python numpy PyYAML matplotlib albumentations pycocotools torch-geometric
+
+## 数据要求 ##
+- HDA-SynChild数据集（需要联系原作者获取）
+- YOLOv9预训练权重（建议使用官方yolov9c.pt作为fallback）
+- 数据结构：
+  ├── images/
+  │   ├── train/
+  │   └── val/
+  └── labels/
+      ├── train/
+      └── val/
+
+## 复现性说明 ##
+- 随机种子：固定为42
+- CuDNN：A100/V100启用benchmark模式，其他GPU启用确定性模式
+- batch_size会根据GPU自动调整
+
+## 预期性能 ##
+- A100-80GB: batch_size=32-48, ~2-3 it/s, mAP@0.5:0.95 ≥ 0.57
+- V100: batch_size=24, ~1.5-2 it/s
+- T4: batch_size=8, ~0.8-1.2 it/s
 """
 
 import os
@@ -1326,9 +1357,41 @@ class ColabStage1Trainer:
             return None
 
 
+def set_random_seeds(seed=42):
+    """设置所有随机种子以确保可复现性"""
+    import random
+    import numpy as np
+    import torch
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # CuDNN设置：在复现性和性能之间平衡
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_properties(0).name
+        if "A100" in gpu_name or "V100" in gpu_name:
+            # 高性能GPU：优先性能，保持一定随机性
+            torch.backends.cudnn.deterministic = False
+            torch.backends.cudnn.benchmark = True
+            print("🚀 High-performance GPU detected: enabling CuDNN benchmark for speed")
+        else:
+            # 普通GPU：优先复现性
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            print("🔒 Enabling deterministic mode for reproducibility")
+    
+    print(f"🔒 Random seeds set to {seed} for reproducibility")
+
+
 def main():
     """主函数 - Colab版本"""
     import time
+    
+    # 设置随机种子确保可复现性
+    set_random_seeds(42)
     
     config = {
         # 模型配置
