@@ -191,31 +191,64 @@ class ColabStage1Trainer:
             
             if weights_path.exists():
                 self.logger.info(f"Loading pretrained weights from {weights_path}")
+                
+                # 检查是否为ultralytics格式的权重
                 try:
-                    # 尝试安全加载
-                    ckpt = torch.load(weights_path, map_location=self.device, weights_only=True)
+                    # 尝试直接加载PyTorch权重
+                    ckpt = torch.load(weights_path, map_location=self.device, weights_only=False)
                 except Exception as e1:
-                    self.logger.warning(f"Safe loading failed: {e1}")
+                    self.logger.warning(f"Direct PyTorch loading failed: {e1}")
+                    
+                    # 尝试使用ultralytics加载并转换
                     try:
-                        # 回退到非安全模式（适用于可信权重文件）
-                        self.logger.info("Attempting to load with weights_only=False (trusted source)")
-                        ckpt = torch.load(weights_path, map_location=self.device, weights_only=False)
+                        self.logger.info("Attempting to load ultralytics format and convert...")
+                        import subprocess
+                        import sys
+                        
+                        # 安装ultralytics如果没有
+                        try:
+                            import ultralytics
+                        except ImportError:
+                            self.logger.info("Installing ultralytics...")
+                            subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics"])
+                            import ultralytics
+                        
+                        from ultralytics import YOLO
+                        
+                        # 加载ultralytics模型
+                        yolo_model = YOLO(str(weights_path))
+                        
+                        # 提取纯PyTorch权重
+                        pure_weights = yolo_model.model.state_dict()
+                        
+                        # 保存转换后的权重
+                        converted_path = weights_path.parent / f"{weights_path.stem}_converted.pt"
+                        torch.save(pure_weights, converted_path)
+                        self.logger.info(f"Converted weights saved to: {converted_path}")
+                        
+                        # 创建ckpt字典格式
+                        ckpt = {'model': pure_weights}
+                        
                     except Exception as e2:
-                        self.logger.error(f"Both loading methods failed: {e2}")
-                        raise
+                        self.logger.error(f"Ultralytics conversion failed: {e2}")
+                        self.logger.warning("Proceeding without pretrained weights...")
+                        ckpt = None
                 
                 # 只加载检测器的权重
-                detector_state = {}
-                state_dict = ckpt['model'] if 'model' in ckpt else ckpt
-                if hasattr(state_dict, 'state_dict'):
-                    state_dict = state_dict.state_dict()
+                if ckpt is not None:
+                    detector_state = {}
+                    state_dict = ckpt['model'] if 'model' in ckpt else ckpt
+                    if hasattr(state_dict, 'state_dict'):
+                        state_dict = state_dict.state_dict()
+                        
+                    for k, v in state_dict.items():
+                        if not any(module in k for module in ['gat_head', 'emotion_head', 'domain_cls']):
+                            detector_state[f'detector.{k}'] = v
                     
-                for k, v in state_dict.items():
-                    if not any(module in k for module in ['gat_head', 'emotion_head', 'domain_cls']):
-                        detector_state[f'detector.{k}'] = v
-                
-                model.load_state_dict(detector_state, strict=False)
-                self.logger.info("Pretrained detector weights loaded successfully")
+                    model.load_state_dict(detector_state, strict=False)
+                    self.logger.info("Pretrained detector weights loaded successfully")
+                else:
+                    self.logger.warning("No pretrained weights loaded, training from scratch")
             else:
                 self.logger.warning(f"Pretrained weights not found: {weights_path}")
         
