@@ -26,11 +26,37 @@ def setup_colab_env():
         print("Mounting Google Drive...")
         drive.mount('/content/drive')
     
-    # 检查GPU
+    # 检查GPU并显示优化信息
     if torch.cuda.is_available():
         gpu_info = torch.cuda.get_device_properties(0)
-        print(f"GPU: {gpu_info.name}")
-        print(f"GPU Memory: {gpu_info.total_memory / 1024**3:.1f} GB")
+        gpu_name = gpu_info.name
+        gpu_memory = gpu_info.total_memory / 1024**3
+        
+        print(f"🚀 GPU: {gpu_name}")
+        print(f"💾 GPU Memory: {gpu_memory:.1f} GB")
+        
+        # 显示针对特定GPU的优化信息
+        if "A100" in gpu_name:
+            if gpu_memory > 70:
+                print("🎯 A100-80GB检测到！已启用高性能优化配置")
+                print("   - Batch Size: ↑ 最大48")
+                print("   - Workers: ↑ 最大20")
+                print("   - TensorFloat-32: ✅ 启用")
+                print("   - FPS目标: ≥80")
+            else:
+                print("🎯 A100-40GB检测到！已启用优化配置")
+                print("   - Batch Size: ↑ 最大32")  
+                print("   - Workers: ↑ 最大16")
+        elif "V100" in gpu_name:
+            print("⚡ V100检测到！已启用中等优化配置")
+            print("   - Batch Size: ↑ 最大24")
+            print("   - FPS目标: ≥50")
+        elif gpu_memory < 16:
+            print("💡 小显存GPU检测到，已启用内存安全配置")
+            print("   - Batch Size: 限制为8")
+        
+        print(f"🔧 CUDA Version: {torch.version.cuda}")
+        print(f"🔧 PyTorch Version: {torch.__version__}")
     else:
         raise RuntimeError("No GPU available in Colab!")
     
@@ -155,6 +181,12 @@ class ColabStage1Trainer:
         
         # 设置cudnn
         torch.backends.cudnn.benchmark = True
+        
+        # A100 TensorFloat-32优化
+        if self.config.get('tf32', False):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            self.logger.info("Enabled TensorFloat-32 for A100 optimization")
         
         # 检查是否有之前的checkpoint
         self.check_resume()
@@ -491,13 +523,30 @@ class ColabStage1Trainer:
         # Colab优化的超参数
         hyp = self.get_hyp_dict()
         
-        # 根据GPU内存调整batch size
+        # 根据GPU类型和内存自动调整batch size
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        if gpu_mem < 16:  # T4 GPU (15GB)
-            self.config['batch_size'] = min(self.config['batch_size'], 8)
-            self.logger.info(f"Adjusted batch size to {self.config['batch_size']} for GPU memory")
+        gpu_name = torch.cuda.get_device_properties(0).name
         
-        # 训练数据加载器
+        if "A100" in gpu_name:
+            # A100优化：80GB显存，可以支持很大的batch_size
+            if gpu_mem > 70:  # A100-80GB
+                self.config['batch_size'] = min(self.config['batch_size'], 48)
+                self.config['workers'] = min(self.config['workers'], 20)
+            else:  # A100-40GB
+                self.config['batch_size'] = min(self.config['batch_size'], 32)
+                self.config['workers'] = min(self.config['workers'], 16)
+            self.logger.info(f"A100 optimized: batch_size={self.config['batch_size']}, workers={self.config['workers']}")
+        elif "V100" in gpu_name:
+            # V100优化：32GB显存
+            self.config['batch_size'] = min(self.config['batch_size'], 24)
+            self.config['workers'] = min(self.config['workers'], 12)
+            self.logger.info(f"V100 optimized: batch_size={self.config['batch_size']}")
+        elif gpu_mem < 16:  # T4/L4等小显存GPU
+            self.config['batch_size'] = min(self.config['batch_size'], 8)
+            self.config['workers'] = min(self.config['workers'], 6)
+            self.logger.info(f"Small GPU optimized: batch_size={self.config['batch_size']}")
+        
+        # 训练数据加载器 - A100优化版
         train_loader, dataset = create_dataloader(
             path=str(data_root / 'images/train'),
             imgsz=self.config['img_size'],
@@ -506,17 +555,20 @@ class ColabStage1Trainer:
             single_cls=True,
             hyp=hyp,
             augment=True,
-            cache=False,  # 完全禁用缓存避免损坏文件
-            rect=self.config.get('rect', False),  # 使用配置控制
+            cache=False,  # 禁用缓存避免损坏文件
+            rect=self.config.get('rect', False),
             rank=-1,
             workers=self.config['workers'],
             image_weights=False,
             quad=False,
             prefix='train: ',
-            shuffle=True
+            shuffle=True,
+            pin_memory=self.config.get('pin_memory', True),
+            persistent_workers=self.config.get('persistent_workers', True),
+            prefetch_factor=self.config.get('prefetch_factor', 2)
         )
         
-        # 验证数据加载器
+        # 验证数据加载器 - A100优化版
         val_loader = create_dataloader(
             path=str(data_root / 'images/val'),
             imgsz=self.config['img_size'],
@@ -525,12 +577,15 @@ class ColabStage1Trainer:
             single_cls=True,
             hyp=hyp,
             augment=False,
-            cache=False,  # 完全禁用缓存避免损坏文件
-            rect=True,  # 验证时可以使用rect
+            cache=False,  # 禁用缓存避免损坏文件
+            rect=True,  # 验证时使用rect提速
             rank=-1,
             workers=self.config['workers'],
             pad=0.5,
-            prefix='val: '
+            prefix='val: ',
+            pin_memory=self.config.get('pin_memory', True),
+            persistent_workers=self.config.get('persistent_workers', True),
+            prefetch_factor=self.config.get('prefetch_factor', 2)
         )[0]
         
         return train_loader, val_loader, dataset
@@ -1120,8 +1175,20 @@ class ColabStage1Trainer:
         self.logger.info(f"   推理速度: {fps:.1f} FPS")
         self.logger.info(f"   平均延迟: {avg_inference_time:.2f} ms")
         
-        # 检查是否达到RTX 3060的目标性能
-        if "RTX 30" in gpu_name or "RTX 40" in gpu_name:
+        # 根据GPU类型检查性能目标
+        if "A100" in gpu_name:
+            target_fps = 80  # A100目标：≥80 FPS
+            if fps >= target_fps:
+                self.logger.info(f"🚀 A100性能优秀! ({fps:.1f} ≥ {target_fps} FPS)")
+            else:
+                self.logger.warning(f"⚠️ A100未达目标! ({fps:.1f} < {target_fps} FPS)")
+        elif "V100" in gpu_name:
+            target_fps = 50  # V100目标：≥50 FPS
+            if fps >= target_fps:
+                self.logger.info(f"✅ V100达到目标! ({fps:.1f} ≥ {target_fps} FPS)")
+            else:
+                self.logger.warning(f"⚠️ V100未达目标! ({fps:.1f} < {target_fps} FPS)")
+        elif "RTX 30" in gpu_name or "RTX 40" in gpu_name:
             target_fps = 28
             if fps >= target_fps:
                 self.logger.info(f"✅ 达到目标性能! ({fps:.1f} ≥ {target_fps} FPS)")
@@ -1260,28 +1327,31 @@ def main():
         'num_au': 32,
         'num_emotion': 6,
         
-        # 数据配置 - L4 GPU优化（内存安全版）
+        # 数据配置 - A100 GPU优化（80GB显存版）
         'img_size': 640,
-        'batch_size': 12,           # 降低batch_size避免OOM
-        'workers': 6,               # L4性能更强，支持更多workers
+        'batch_size': 32,           # A100可以支持更大batch_size
+        'workers': 16,              # A100支持更多并行workers
         'pin_memory': True,         # 启用pin_memory加速数据传输
-        'cache_images': False,      # 完全禁用缓存避免损坏
-        'check_images': True,       # 启用图像完整性检查
-        'rect': False,              # 禁用矩形训练避免缓存问题
+        'cache_images': False,      # 禁用缓存避免损坏文件
+        'check_images': False,      # 跳过图像检查加速启动
+        'rect': True,               # A100内存充足，启用矩形训练提效
+        'prefetch_factor': 4,       # 预取更多批次
+        'persistent_workers': True, # 保持worker进程提速
         
-        # 训练配置 - L4加速版
+        # 训练配置 - A100加速版
         'epochs': 20,               # 保持20个epochs
-        'lr0': 0.003,               # 调整学习率适配batch_size=12
-        'warmup_epochs': 2,         # 更短warmup
+        'lr0': 0.005,               # 提高学习率适配更大batch_size
+        'warmup_epochs': 2,         # warmup epochs
         'optimizer': 'AdamW',
         'scheduler': 'cosine',
         'device': 'cuda:0',
         'use_ema': True,
         'save_period': 5,           # 保存频率
         'amp': True,                # 混合精度训练
-        'gradient_accumulation': 2, # 梯度累积弥补batch_size减小
-        'val_frequency': 3,         # 每3个epoch验证一次
-        'patience': 6,              # 早停机制
+        'tf32': True,               # 启用TensorFloat-32优化
+        'gradient_accumulation': 1, # A100大batch_size，减少梯度累积
+        'val_frequency': 2,         # 每2个epoch验证一次（更频繁）
+        'patience': 8,              # 稍微增加早停耐心
         
         # 保存配置
         'save_dir': '/content/runs/stage1_hda_synchild_l4',
