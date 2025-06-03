@@ -438,7 +438,7 @@ class ColabStage1Trainer:
             cache='ram' if gpu_mem > 20 else False,  # 只在大内存时缓存
             rect=False,
             rank=-1,
-            workers=2,  # Colab CPU限制
+            workers=self.config['workers'],  # L4优化：更多workers
             image_weights=False,
             quad=False,
             prefix='train: ',
@@ -457,7 +457,7 @@ class ColabStage1Trainer:
             cache='ram' if gpu_mem > 20 else False,
             rect=True,
             rank=-1,
-            workers=2,
+            workers=self.config['workers'],  # L4优化：更多workers
             pad=0.5,
             prefix='val: '
         )[0]
@@ -660,8 +660,11 @@ class ColabStage1Trainer:
                 train_loss = self.train_epoch(model, train_loader, optimizer, compute_loss, 
                                             epoch, self.config['epochs'])
                 
-                # 验证
-                val_loss = self.validate(model, val_loader, compute_loss)
+                # 验证（按频率进行）
+                if (epoch + 1) % self.config.get('val_frequency', 1) == 0:
+                    val_loss = self.validate(model, val_loader, compute_loss)
+                else:
+                    val_loss = None
                 
                 # 更新EMA
                 if ema:
@@ -671,27 +674,34 @@ class ColabStage1Trainer:
                 scheduler.step()
                 
                 # 记录日志
-                self.logger.info(
-                    f"Epoch {epoch+1}/{self.config['epochs']} - "
-                    f"Train Loss: {train_loss[0]:.4f} - "
-                    f"Val Loss: {val_loss[0]:.4f} - "
-                    f"LR: {optimizer.param_groups[0]['lr']:.6f} - "
-                    f"Patience: {patience_counter}/{patience}"
-                )
+                if val_loss is not None:
+                    self.logger.info(
+                        f"Epoch {epoch+1}/{self.config['epochs']} - "
+                        f"Train Loss: {train_loss[0]:.4f} - "
+                        f"Val Loss: {val_loss[0]:.4f} - "
+                        f"LR: {optimizer.param_groups[0]['lr']:.6f} - "
+                        f"Patience: {patience_counter}/{patience}"
+                    )
+                    
+                    # 保存最佳模型和早停检查
+                    fitness = 1 / (val_loss[0] + 1e-6)
+                    if fitness > best_fitness:
+                        best_fitness = fitness
+                        patience_counter = 0
+                        self.save_checkpoint(model, optimizer, epoch, best_fitness, ema, best=True)
+                        self.logger.info(f"New best model! Fitness: {fitness:.6f}")
+                    else:
+                        patience_counter += 1
+                else:
+                    self.logger.info(
+                        f"Epoch {epoch+1}/{self.config['epochs']} - "
+                        f"Train Loss: {train_loss[0]:.4f} - "
+                        f"LR: {optimizer.param_groups[0]['lr']:.6f}"
+                    )
                 
                 # 保存检查点
                 if (epoch + 1) % self.config['save_period'] == 0:
                     self.save_checkpoint(model, optimizer, epoch, best_fitness, ema)
-                
-                # 保存最佳模型和早停检查
-                fitness = 1 / (val_loss[0] + 1e-6)
-                if fitness > best_fitness:
-                    best_fitness = fitness
-                    patience_counter = 0
-                    self.save_checkpoint(model, optimizer, epoch, best_fitness, ema, best=True)
-                    self.logger.info(f"New best model! Fitness: {fitness:.6f}")
-                else:
-                    patience_counter += 1
                     
                 # 早停检查
                 if patience_counter >= patience:
@@ -789,26 +799,29 @@ def main():
         'num_au': 32,
         'num_emotion': 6,
         
-        # 数据配置
+        # 数据配置 - L4 GPU优化
         'img_size': 640,
-        'batch_size': 8,  # Colab T4 GPU优化
-        'workers': 2,     # Colab CPU限制
-        'cache_images': False,  # 节省内存
+        'batch_size': 24,           # L4可以支持更大batch
+        'workers': 6,               # L4性能更强，支持更多workers
+        'pin_memory': True,         # 启用pin_memory加速数据传输
+        'cache_images': False,      # 节省内存
         
-        # 训练配置
-        'epochs': 40,
-        'lr0': 0.002,
+        # 训练配置 - L4加速版
+        'epochs': 20,               # 保持20个epochs
+        'lr0': 0.005,               # 更大batch对应更高学习率
+        'warmup_epochs': 2,         # 更短warmup
         'optimizer': 'AdamW',
         'scheduler': 'cosine',
         'device': 'cuda:0',
         'use_ema': True,
-        'save_period': 5,  # 更频繁保存
-        'amp': True,  # 混合精度训练
-        'gradient_accumulation': 2,  # 梯度累积
-        'patience': 8,  # 早停机制：8个epoch验证损失不下降就停止
+        'save_period': 5,           # 保存频率
+        'amp': True,                # 混合精度训练
+        'gradient_accumulation': 1, # 直接用大batch，不需要梯度累积
+        'val_frequency': 3,         # 每3个epoch验证一次
+        'patience': 6,              # 早停机制
         
         # 保存配置
-        'save_dir': '/content/runs/stage1_hda_synchild',
+        'save_dir': '/content/runs/stage1_hda_synchild_l4',
     }
     
     # 记录开始时间
