@@ -799,16 +799,16 @@ def main():
         'num_au': 32,
         'num_emotion': 6,
         
-        # 数据配置 - L4 GPU优化
+        # 数据配置 - L4 GPU优化（内存安全版）
         'img_size': 640,
-        'batch_size': 24,           # L4可以支持更大batch
+        'batch_size': 12,           # 降低batch_size避免OOM
         'workers': 6,               # L4性能更强，支持更多workers
         'pin_memory': True,         # 启用pin_memory加速数据传输
         'cache_images': False,      # 节省内存
         
         # 训练配置 - L4加速版
         'epochs': 20,               # 保持20个epochs
-        'lr0': 0.005,               # 更大batch对应更高学习率
+        'lr0': 0.003,               # 调整学习率适配batch_size=12
         'warmup_epochs': 2,         # 更短warmup
         'optimizer': 'AdamW',
         'scheduler': 'cosine',
@@ -816,7 +816,7 @@ def main():
         'use_ema': True,
         'save_period': 5,           # 保存频率
         'amp': True,                # 混合精度训练
-        'gradient_accumulation': 1, # 直接用大batch，不需要梯度累积
+        'gradient_accumulation': 2, # 梯度累积弥补batch_size减小
         'val_frequency': 3,         # 每3个epoch验证一次
         'patience': 6,              # 早停机制
         
