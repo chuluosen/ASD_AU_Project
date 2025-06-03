@@ -552,16 +552,21 @@ class ColabStage1Trainer:
             with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
                 pred = model.detector(imgs)
                 
-                # 确保pred是正确的格式（应该是张量列表）
-                if isinstance(pred, list) and len(pred) > 0 and isinstance(pred[0], list):
-                    # 如果是嵌套列表，展平为张量列表
-                    pred = [item for sublist in pred for item in (sublist if isinstance(sublist, list) else [sublist])]
-                elif not isinstance(pred, list):
-                    # 如果不是列表，转换为列表
+                # TAL损失函数期望特征列表格式，不需要额外处理
+                # 如果pred不是列表，转换为列表
+                if not isinstance(pred, list):
                     pred = [pred] if pred is not None else []
                 
-                # 确保每个元素都是张量
-                pred = [p for p in pred if isinstance(p, torch.Tensor)]
+                # 调试信息：打印预测输出的格式
+                if i == 0:  # 只在第一个batch打印
+                    self.logger.info(f"Model output type: {type(pred)}")
+                    if isinstance(pred, list):
+                        self.logger.info(f"Pred list length: {len(pred)}")
+                        for j, p in enumerate(pred):
+                            if isinstance(p, torch.Tensor):
+                                self.logger.info(f"Pred[{j}] shape: {p.shape}")
+                    elif isinstance(pred, torch.Tensor):
+                        self.logger.info(f"Pred tensor shape: {pred.shape}")
                 
                 loss, loss_items = compute_loss(pred, targets.to(self.device))
                 loss = loss / accumulation_steps
@@ -602,6 +607,10 @@ class ColabStage1Trainer:
         # 添加超参数到检测器模型（损失函数需要）
         hyp = self.get_hyp_dict()
         model.detector.hyp = hyp
+        
+        # 确保模型stride和检测头正确初始化
+        self.logger.info("Initializing model detection head...")
+        _ = model.detector(torch.zeros(1, 3, self.config['img_size'], self.config['img_size'], device=self.device))
         
         # 创建损失函数
         compute_loss = ComputeLoss(model.detector)
@@ -743,16 +752,10 @@ class ColabStage1Trainer:
                 with torch.amp.autocast('cuda', enabled=self.config.get('amp', True)):
                     pred = model.detector(imgs)
                     
-                    # 确保pred是正确的格式（应该是张量列表）
-                    if isinstance(pred, list) and len(pred) > 0 and isinstance(pred[0], list):
-                        # 如果是嵌套列表，展平为张量列表
-                        pred = [item for sublist in pred for item in (sublist if isinstance(sublist, list) else [sublist])]
-                    elif not isinstance(pred, list):
-                        # 如果不是列表，转换为列表
+                    # TAL损失函数期望特征列表格式，不需要额外处理
+                    # 如果pred不是列表，转换为列表
+                    if not isinstance(pred, list):
                         pred = [pred] if pred is not None else []
-                    
-                    # 确保每个元素都是张量
-                    pred = [p for p in pred if isinstance(p, torch.Tensor)]
                     
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
