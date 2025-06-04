@@ -1291,7 +1291,18 @@ class ColabStage1Trainer:
             # 创建标准YOLOv9模型并加载权重
             from models.yolo import Model
             from utils.torch_utils import de_parallel
-            yolo_model = Model(self.config['model_cfg'], ch=3, nc=1, anchors=None).float()
+            
+            # 确保使用正确的模型配置路径
+            model_cfg = self.config['model_cfg']
+            if not os.path.exists(model_cfg):
+                # 尝试在content目录查找
+                model_cfg = f'/content/{self.config["model_cfg"]}'
+                if not os.path.exists(model_cfg):
+                    # 尝试在yolov9目录查找
+                    model_cfg = f'/content/ASD_AU_Project/code/yolov9/models/detect/{self.config["model_cfg"]}'
+            
+            self.logger.info(f"Using model config: {model_cfg}")
+            yolo_model = Model(model_cfg, ch=3, nc=1, anchors=None).float()
             
             # 复制当前模型的权重到标准YOLOv9模型
             model_state = de_parallel(model).state_dict()
