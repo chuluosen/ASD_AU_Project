@@ -1297,51 +1297,44 @@ class ColabStage1Trainer:
             return np.array([float('inf')])
     
     def evaluate_map(self, model, val_loader, data_yaml_path):
-        """修复YOLOv9的val.py评估 - 方案A：直接传递模型对象"""
+        """修复YOLOv9的val.py评估 - 方案A：直接传递模型对象和数据字典"""
         try:
-            # 直接传递模型对象，避免保存/加载权重文件
+            # 读取yaml文件转换为字典
+            import yaml
             from val import run as validate_yolo
             from utils.torch_utils import de_parallel   # 确保去掉 DDP/Horovod wrapper
             
+            # ① 读 yaml → dict
+            with open(data_yaml_path, "r") as f:
+                data_cfg = yaml.safe_load(f)
+            
+            # ② 确保必备字段齐全
+            if 'names' in data_cfg and isinstance(data_cfg['names'], dict):
+                # val.py 里要求 list，所以把 {0: 'face'} → ['face']
+                data_cfg['names'] = list(data_cfg['names'].values())
+            data_cfg.setdefault('nc', len(data_cfg['names']))
+            
+            # ③ 交给 val.run；不再写临时权重，不再传字符串路径
             results = validate_yolo(
-                data=str(data_yaml_path),
-                weights=None,                     # 不再传权重文件
-                model=de_parallel(model).float(), # 直接给模型
+                data=data_cfg,                    # ← dict
+                model=de_parallel(model).float(), # ← nn.Module
+                weights=None,                     # ← 省略
                 batch_size=self.config['batch_size'] * 2,
                 imgsz=self.config['img_size'],
                 conf_thres=0.001,
-                iou_thres=0.6,
+                iou_thres=0.60,
                 max_det=300,
                 task='val',
                 device=str(self.device),
                 workers=self.config['workers'],
                 single_cls=True,
-                augment=False,
                 verbose=False,
-                save_txt=False,
-                save_hybrid=False,
-                save_conf=False,
                 save_json=False,
-                project=str(self.save_dir),
-                name='val',
-                exist_ok=True,
-                half=False,
-                dnn=False
+                half=False
             )
             
-            # 提取关键指标
-            if results and len(results) >= 4:
-                precision, recall, map50, map50_95 = results[:4]
-                
-                return {
-                    'precision': float(precision),
-                    'recall': float(recall), 
-                    'mAP@0.5': float(map50),
-                    'mAP@0.5:0.95': float(map50_95)
-                }
-            else:
-                self.logger.warning("Unexpected results format from validation")
-                return None
+            # results: (precision, recall, mAP50, mAP50-95, …)
+            return dict(zip(['precision','recall','mAP@0.5','mAP@0.5:0.95'], results[:4]))
             
         except Exception as e:
             self.logger.warning(f"mAP evaluation failed: {e}")
