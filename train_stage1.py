@@ -38,6 +38,20 @@ import os
 import sys
 import torch
 import torch.nn as nn
+
+# 解决PyTorch 2.6的weights_only问题
+import torch.serialization
+try:
+    # 方法1：添加安全全局类
+    torch.serialization.add_safe_globals(['DetectionModel', 'Model'])
+except:
+    # 方法2：monkey patch torch.load
+    _original_torch_load = torch.load
+    def patched_torch_load(*args, **kwargs):
+        if 'weights_only' not in kwargs:
+            kwargs['weights_only'] = False
+        return _original_torch_load(*args, **kwargs)
+    torch.load = patched_torch_load
 from torch.utils.data import DataLoader
 from pathlib import Path
 import yaml
