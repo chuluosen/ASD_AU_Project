@@ -410,7 +410,7 @@ class ColabStage1Trainer:
         if self.config.get('resume'):
             self.logger.info(f"Found checkpoint: {self.config['resume']}")
             try:
-                checkpoint = torch.load(self.config['resume'], map_location=self.device)
+                checkpoint = torch.load(self.config['resume'], map_location=self.device, weights_only=False)
                 # 检查checkpoint是否与当前模型架构兼容
                 checkpoint_keys = set(checkpoint['model_state_dict'].keys())
                 model_keys = set(model.state_dict().keys())
@@ -930,7 +930,7 @@ class ColabStage1Trainer:
         
         # 恢复优化器状态
         if self.config.get('resume') and start_epoch > 0:
-            checkpoint = torch.load(self.config['resume'], map_location=self.device)
+            checkpoint = torch.load(self.config['resume'], map_location=self.device, weights_only=False)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         # 创建调度器
