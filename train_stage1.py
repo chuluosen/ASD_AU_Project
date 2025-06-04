@@ -1296,7 +1296,7 @@ class ColabStage1Trainer:
                 'updates': 0,
                 'epoch': -1
             }
-            torch.save(checkpoint, temp_weights, weights_only=False)
+            torch.save(checkpoint, temp_weights)
             
             # 调用YOLOv9的验证函数（只传权重文件）
             from val import run as validate_yolo
