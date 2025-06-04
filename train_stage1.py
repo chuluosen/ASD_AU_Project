@@ -676,6 +676,8 @@ class ColabStage1Trainer:
         if user_data_yaml.exists():
             self.logger.info(f"Using existing data.yaml from: {user_data_yaml}")
             data_yaml = user_data_yaml
+            # 保存data_yaml路径供后续使用
+            self.data_yaml_path = data_yaml
         else:
             # 创建data yaml
             data_yaml = self.save_dir / 'hda_synchild_colab.yaml'
@@ -690,6 +692,8 @@ class ColabStage1Trainer:
                 yaml.dump(data_dict, f)
             self.logger.info(f"Created data.yaml at: {data_yaml}")
         
+        # 保存data_yaml路径供后续使用
+        self.data_yaml_path = data_yaml
         
         # Colab优化的超参数
         hyp = self.get_hyp_dict()
@@ -1007,7 +1011,7 @@ class ColabStage1Trainer:
                     if (epoch + 1) % self.config.get('map_eval_frequency', 2) == 0 or \
                        epoch >= self.config['epochs'] - 3:
                         map_results = self.evaluate_map(model, val_loader, 
-                                                      self.save_dir / 'hda_synchild_colab.yaml')
+                                                      self.data_yaml_path)
                 
                 # 更新EMA
                 if ema:
@@ -1147,7 +1151,7 @@ class ColabStage1Trainer:
         self.logger.info("📊 最终mAP评估...")
         try:
             final_map_results = self.evaluate_map(model, val_loader, 
-                                                 self.save_dir / 'hda_synchild_colab.yaml')
+                                                 self.data_yaml_path)
             if final_map_results:
                 # 保存最终mAP结果
                 map_file = self.drive_save_dir / 'final_map_results.json'
