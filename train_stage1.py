@@ -234,10 +234,19 @@ class ColabStage1Trainer:
         # 过滤出真正存在的文件
         existing_checkpoints = [ckpt for ckpt in checkpoints if ckpt.exists()]
         
+        # 也检查best.pt文件
+        best_pt = self.drive_save_dir / 'best.pt'
+        if best_pt.exists():
+            existing_checkpoints.append(best_pt)
+        
         if existing_checkpoints:
-            # 找到最新的checkpoint
-            latest_checkpoint = max(existing_checkpoints, key=lambda p: int(p.stem.split('_')[-1]))
-            self.logger.info(f"Found checkpoint: {latest_checkpoint}")
+            # 找到最新的checkpoint (优先使用best.pt)
+            if best_pt in existing_checkpoints:
+                latest_checkpoint = best_pt
+                self.logger.info(f"Found best checkpoint: {latest_checkpoint}")
+            else:
+                latest_checkpoint = max(existing_checkpoints, key=lambda p: int(p.stem.split('_')[-1]))
+                self.logger.info(f"Found checkpoint: {latest_checkpoint}")
             self.config['resume'] = str(latest_checkpoint)
         else:
             self.logger.info("No valid checkpoints found, starting fresh training")
