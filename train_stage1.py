@@ -1297,26 +1297,16 @@ class ColabStage1Trainer:
             return np.array([float('inf')])
     
     def evaluate_map(self, model, val_loader, data_yaml_path):
-        """修复YOLOv9的val.py评估 - 使用权重文件方式避免参数冲突"""
+        """修复YOLOv9的val.py评估 - 方案A：直接传递模型对象"""
         try:
-            # 保存临时权重文件
-            temp_weights = self.save_dir / 'temp_eval_weights.pt'
-            
-            # 直接保存模型的state_dict，避免模型对象序列化问题
-            torch.save({
-                'model': model.state_dict(),  # 只保存state_dict，不保存整个模型对象
-                'ema': None,
-                'updates': 0,
-                'optimizer': None,
-                'epoch': -1
-            }, temp_weights)
-            
-            # 调用YOLOv9的验证函数（只传权重文件）
+            # 直接传递模型对象，避免保存/加载权重文件
             from val import run as validate_yolo
+            from utils.torch_utils import de_parallel   # 确保去掉 DDP/Horovod wrapper
             
             results = validate_yolo(
-                data=str(data_yaml_path),  # 传递yaml路径字符串
-                weights=str(temp_weights), # 只传权重文件
+                data=str(data_yaml_path),
+                weights=None,                     # 不再传权重文件
+                model=de_parallel(model).float(), # 直接给模型
                 batch_size=self.config['batch_size'] * 2,
                 imgsz=self.config['img_size'],
                 conf_thres=0.001,
@@ -1338,10 +1328,6 @@ class ColabStage1Trainer:
                 half=False,
                 dnn=False
             )
-            
-            # 清理临时文件
-            if temp_weights.exists():
-                temp_weights.unlink()
             
             # 提取关键指标
             if results and len(results) >= 4:
