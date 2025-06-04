@@ -1318,6 +1318,12 @@ class ColabStage1Trainer:
                 data_cfg['names'] = list(data_cfg['names'].values())
             data_cfg.setdefault('nc', len(data_cfg['names']))
             
+            # 打印调试信息
+            self.logger.info(f"Calling validate_yolo with:")
+            self.logger.info(f"  data_cfg: {data_cfg}")
+            self.logger.info(f"  model type: {type(de_parallel(model))}")
+            self.logger.info(f"  device: {self.device}")
+            
             # ③ 交给 val.run；不再写临时权重，不再传字符串路径
             results = validate_yolo(
                 data=data_cfg,                    # ← dict
@@ -1336,6 +1342,17 @@ class ColabStage1Trainer:
                 save_json=False,
                 half=False
             )
+            
+            self.logger.info(f"validate_yolo returned: {type(results)}, value: {results}")
+            
+            # 检查results是否有效
+            if results is None:
+                self.logger.warning("validate_yolo returned None")
+                return None
+            
+            if not isinstance(results, (list, tuple)) or len(results) < 4:
+                self.logger.warning(f"Unexpected results format: {type(results)}, length: {len(results) if hasattr(results, '__len__') else 'N/A'}")
+                return None
             
             # results: (precision, recall, mAP50, mAP50-95, …)
             return dict(zip(['precision','recall','mAP@0.5','mAP@0.5:0.95'], results[:4]))
