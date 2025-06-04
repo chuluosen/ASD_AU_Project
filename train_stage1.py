@@ -1283,15 +1283,27 @@ class ColabStage1Trainer:
             return np.array([float('inf')])
     
     def evaluate_map(self, model, val_loader, data_yaml_path):
-        """修复YOLOv9的val.py评估 - 方案A：直接传递模型对象"""
+        """修复YOLOv9的val.py评估 - 使用权重文件方式避免参数冲突"""
         try:
-            # 调用YOLOv9的验证函数（直接传模型，避免OrderedDict问题）
+            # 保存临时权重文件
+            temp_weights = self.save_dir / 'temp_eval_weights.pt'
+            
+            # 保存完整的模型文件（包含nn.Module对象）
+            from utils.torch_utils import de_parallel
+            checkpoint = {
+                'model': de_parallel(model).float(),  # 保存nn.Module对象，不是state_dict
+                'ema': None,
+                'updates': 0,
+                'epoch': -1
+            }
+            torch.save(checkpoint, temp_weights, weights_only=False)
+            
+            # 调用YOLOv9的验证函数（只传权重文件）
             from val import run as validate_yolo
             
             results = validate_yolo(
-                data=str(data_yaml_path),  # 确保是字符串
-                model=model.float(),       # 直接传递模型对象
-                weights=None,              # 不使用权重文件
+                data=str(data_yaml_path),  # 传递yaml路径字符串
+                weights=str(temp_weights), # 只传权重文件
                 batch_size=self.config['batch_size'] * 2,
                 imgsz=self.config['img_size'],
                 conf_thres=0.001,
@@ -1310,9 +1322,13 @@ class ColabStage1Trainer:
                 project=str(self.save_dir),
                 name='val',
                 exist_ok=True,
-                half=False,  # 改为False避免精度问题
+                half=False,
                 dnn=False
             )
+            
+            # 清理临时文件
+            if temp_weights.exists():
+                temp_weights.unlink()
             
             # 提取关键指标
             if results and len(results) >= 4:
