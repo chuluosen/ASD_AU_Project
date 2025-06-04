@@ -1277,7 +1277,7 @@ class ColabStage1Trainer:
             }
             torch.save(checkpoint, temp_weights)
             
-            # 调用YOLOv9的验证函数
+            # 调用YOLOv9的验证函数（修复：不传递compute_loss避免OrderedDict错误）
             from val import run as validate_yolo
             
             results = validate_yolo(
@@ -1302,7 +1302,9 @@ class ColabStage1Trainer:
                 name='val',
                 exist_ok=True,
                 half=False,  # 改为False避免精度问题
-                dnn=False
+                dnn=False,
+                model=None,  # 强制使用权重文件加载，避免传递模型对象
+                compute_loss=None  # 修复：不传递compute_loss避免OrderedDict问题
             )
             
             # 清理临时文件
