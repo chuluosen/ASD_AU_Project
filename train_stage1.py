@@ -224,8 +224,8 @@ class ColabStage1Trainer:
             os.environ['PIN_MEMORY'] = 'True'
             self.logger.info("Enabled pin_memory for DataLoader optimization")
         
-        # 检查是否有之前的checkpoint
-        self.check_resume()
+        # 检查是否有之前的checkpoint (暂时注释掉用于测试)
+        # self.check_resume()
         
     def check_resume(self):
         """检查是否需要恢复训练"""
@@ -405,9 +405,9 @@ class ColabStage1Trainer:
         model = model.to(self.device)
         self.logger.info(f"Model moved to device: {self.device}")
         
-        # 恢复训练（跳过不兼容的checkpoint）
+        # 恢复训练（跳过不兼容的checkpoint）(暂时注释掉用于测试)
         start_epoch = 0
-        if self.config.get('resume'):
+        if False and self.config.get('resume'):
             self.logger.info(f"Found checkpoint: {self.config['resume']}")
             try:
                 checkpoint = torch.load(self.config['resume'], map_location=self.device, weights_only=False)
@@ -822,13 +822,26 @@ class ColabStage1Trainer:
     def train_epoch(self, model, train_loader, optimizer, compute_loss, epoch, epochs, scaler=None):
         """训练一个epoch（添加NaN保护）"""
         model.train()
-        pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}')
+        
+        # 测试模式：限制训练样本数量
+        if self.config.get('test_mode', False):
+            max_batches = self.config.get('test_samples', 100) // self.config['batch_size']
+            max_batches = max(1, max_batches)  # 至少1个batch
+            total_batches = min(len(train_loader), max_batches)
+            self.logger.info(f"Test mode: Using only {max_batches} batches ({max_batches * self.config['batch_size']} samples)")
+        else:
+            total_batches = len(train_loader)
+            
+        pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f'Epoch {epoch+1}/{epochs}')
         
         losses = []
         accumulation_steps = self.config.get('gradient_accumulation', 1)
         nan_count = 0  # 新增：统计NaN次数
         
         for i, (imgs, targets, paths, _) in pbar:
+            # 测试模式：限制batch数量
+            if self.config.get('test_mode', False) and i >= max_batches:
+                break
             imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
             
             # 前向传播
@@ -928,8 +941,8 @@ class ColabStage1Trainer:
         # 创建优化器
         optimizer = self.create_optimizer(model)
         
-        # 恢复优化器状态
-        if self.config.get('resume') and start_epoch > 0:
+        # 恢复优化器状态 (暂时注释掉用于测试)
+        if False and self.config.get('resume') and start_epoch > 0:
             checkpoint = torch.load(self.config['resume'], map_location=self.device, weights_only=False)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
@@ -1228,8 +1241,17 @@ class ColabStage1Trainer:
         model.eval()
         losses = []
         
+        # 测试模式：限制验证样本数量
+        if self.config.get('test_mode', False):
+            max_val_batches = self.config.get('test_samples', 100) // (self.config['batch_size'] * 2)
+            max_val_batches = max(1, max_val_batches)  # 至少1个batch
+            self.logger.info(f"Test mode: Validating only {max_val_batches} batches")
+        
         with torch.no_grad():
-            for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
+            for i, (imgs, targets, paths, _) in enumerate(tqdm(val_loader, desc='Validating')):
+                # 测试模式：限制batch数量
+                if self.config.get('test_mode', False) and i >= max_val_batches:
+                    break
                 imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
                 
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
@@ -1261,28 +1283,15 @@ class ColabStage1Trainer:
             return np.array([float('inf')])
     
     def evaluate_map(self, model, val_loader, data_yaml_path):
-        """修复YOLOv9的val.py评估"""
+        """修复YOLOv9的val.py评估 - 方案A：直接传递模型对象"""
         try:
-            # 保存当前模型权重（修复格式问题）
-            temp_weights = self.save_dir / 'temp_weights.pt'
-            
-            # 使用YOLOv9期望的格式保存
-            checkpoint = {
-                'epoch': -1,
-                'model': model.float().state_dict(),  # 确保是float32
-                'optimizer': None,
-                'ema': None,
-                'updates': 0,
-                'opt': {'weights': str(temp_weights)}
-            }
-            torch.save(checkpoint, temp_weights)
-            
-            # 调用YOLOv9的验证函数（修复：不传递compute_loss避免OrderedDict错误）
+            # 调用YOLOv9的验证函数（直接传模型，避免OrderedDict问题）
             from val import run as validate_yolo
             
             results = validate_yolo(
                 data=str(data_yaml_path),  # 确保是字符串
-                weights=str(temp_weights),
+                model=model.float(),       # 直接传递模型对象
+                weights=None,              # 不使用权重文件
                 batch_size=self.config['batch_size'] * 2,
                 imgsz=self.config['img_size'],
                 conf_thres=0.001,
@@ -1302,14 +1311,8 @@ class ColabStage1Trainer:
                 name='val',
                 exist_ok=True,
                 half=False,  # 改为False避免精度问题
-                dnn=False,
-                model=None,  # 强制使用权重文件加载，避免传递模型对象
-                compute_loss=None  # 修复：不传递compute_loss避免OrderedDict问题
+                dnn=False
             )
-            
-            # 清理临时文件
-            if temp_weights.exists():
-                temp_weights.unlink()
             
             # 提取关键指标
             if results and len(results) >= 4:
@@ -1564,8 +1567,10 @@ def main():
         'check_images': False,      # 跳过图像检查加速启动
         'rect': True,               # A100内存充足，启用矩形训练提效
         
-        # 训练配置 - A100加速版
-        'epochs': 20,               # 保持20个epochs
+        # 训练配置 - 小批量测试版
+        'epochs': 3,                # 改为3个epoch用于测试
+        'test_mode': True,          # 启用测试模式，只使用少量数据
+        'test_samples': 100,        # 测试模式下每个epoch只用100个样本
         'lr0': 0.001,               # 提高学习率适配更大batch_size
         'warmup_epochs': 3,         # warmup epochs
         'optimizer': 'AdamW',
