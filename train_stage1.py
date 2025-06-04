@@ -1302,35 +1302,14 @@ class ColabStage1Trainer:
             # 保存临时权重文件
             temp_weights = self.save_dir / 'temp_eval_weights.pt'
             
-            # 创建标准YOLOv9模型并加载权重
-            from models.yolo import Model
-            from utils.torch_utils import de_parallel
-            
-            # 确保使用正确的模型配置路径
-            model_cfg = self.config['model_cfg']
-            if not os.path.exists(model_cfg):
-                # 尝试在content目录查找
-                model_cfg = f'/content/{self.config["model_cfg"]}'
-                if not os.path.exists(model_cfg):
-                    # 尝试在yolov9目录查找
-                    model_cfg = f'/content/ASD_AU_Project/code/yolov9/models/detect/{self.config["model_cfg"]}'
-            
-            self.logger.info(f"Using model config: {model_cfg}")
-            yolo_model = Model(model_cfg, ch=3, nc=1, anchors=None).float()
-            
-            # 复制当前模型的权重到标准YOLOv9模型
-            model_state = de_parallel(model).state_dict()
-            missing_keys, unexpected_keys = yolo_model.load_state_dict(model_state, strict=False)
-            
-            # 保存标准格式的checkpoint
-            checkpoint = {
-                'model': yolo_model,  # 标准YOLOv9模型
+            # 直接保存模型的state_dict，避免模型对象序列化问题
+            torch.save({
+                'model': model.state_dict(),  # 只保存state_dict，不保存整个模型对象
                 'ema': None,
                 'updates': 0,
-                'epoch': -1,
-                'optimizer': None
-            }
-            torch.save(checkpoint, temp_weights)
+                'optimizer': None,
+                'epoch': -1
+            }, temp_weights)
             
             # 调用YOLOv9的验证函数（只传权重文件）
             from val import run as validate_yolo
