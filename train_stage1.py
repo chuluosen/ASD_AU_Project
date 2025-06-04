@@ -801,67 +801,87 @@ class ColabStage1Trainer:
                 self.logger.info(f"Removed old checkpoint: {ckpt}")
     
     def train_epoch(self, model, train_loader, optimizer, compute_loss, epoch, epochs, scaler=None):
-        """训练一个epoch（内存优化）"""
-        model.train()
-        pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}')
+    """训练一个epoch（添加NaN保护）"""
+    model.train()
+    pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}')
+    
+    losses = []
+    accumulation_steps = self.config.get('gradient_accumulation', 1)
+    nan_count = 0  # 新增：统计NaN次数
+    
+    for i, (imgs, targets, paths, _) in pbar:
+        imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
         
-        losses = []
-        accumulation_steps = self.config.get('gradient_accumulation', 1)
+        # 前向传播
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
+            raw_pred = model(imgs)
+            pred = self.process_model_output_for_loss(raw_pred, is_training=True, debug=(i == 0))
+            loss, loss_items = compute_loss(pred, targets.to(self.device))
+            
+            # 新增：检查NaN
+            if torch.isnan(loss) or torch.isinf(loss):
+                nan_count += 1
+                self.logger.warning(f"NaN/Inf loss detected in batch {i}! Skipping...")
+                optimizer.zero_grad()
+                if nan_count > 10:  # 如果连续多个NaN，停止训练
+                    raise RuntimeError("Too many NaN losses detected!")
+                continue
+                
+            loss = loss / accumulation_steps
         
-        for i, (imgs, targets, paths, _) in pbar:
-            imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
+        # 反向传播
+        if scaler is not None:
+            scaler.scale(loss).backward()
             
-            # 前向传播
-            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
-                # 直接使用YOLOv9模型
-                raw_pred = model(imgs)
+            if (i + 1) % accumulation_steps == 0:
+                # 新增：梯度裁剪
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                              max_norm=self.config.get('clip_grad_norm', 10.0))
                 
-                # 使用完善的输出处理方法
-                pred = self.process_model_output_for_loss(raw_pred, is_training=True, debug=(i == 0))
-                
-                loss, loss_items = compute_loss(pred, targets.to(self.device))
-                loss = loss / accumulation_steps
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+        else:
+            loss.backward()
             
-            # 反向传播（使用GradScaler支持AMP）
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                
-                # 梯度累积
-                if (i + 1) % accumulation_steps == 0:
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-            else:
-                loss.backward()
-                
-                # 梯度累积
-                if (i + 1) % accumulation_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
-            
-            # 更新进度条
+            if (i + 1) % accumulation_steps == 0:
+                # 新增：梯度裁剪
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                              max_norm=self.config.get('clip_grad_norm', 10.0))
+                optimizer.step()
+                optimizer.zero_grad()
+        
+        # 更新进度条
+        if not (torch.isnan(loss) or torch.isinf(loss)):
             losses.append(loss_items.cpu().numpy())
-            if len(losses) > 100:
-                losses = losses[-100:]  # 限制内存使用
-            
+        
+        if len(losses) > 100:
+            losses = losses[-100:]
+        
+        if losses:  # 只有在有有效损失时才更新
             mean_loss = np.mean(losses, axis=0)
             pbar.set_postfix({
                 'loss': f'{mean_loss[0]:.4f}',
-                'GPU': f'{torch.cuda.memory_reserved() / 1024**3:.1f}G'
+                'GPU': f'{torch.cuda.memory_reserved() / 1024**3:.1f}G',
+                'NaN': nan_count  # 显示NaN计数
             })
-            
-            # 移除频繁的显存清理（会降低性能）
-        
-        # 处理最后一批剩余的梯度
-        if (len(train_loader)) % accumulation_steps != 0:
-            if scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad()
-        
-        return np.mean(losses, axis=0)
+    
+    # 处理最后的梯度
+    if (len(train_loader)) % accumulation_steps != 0:
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                          max_norm=self.config.get('clip_grad_norm', 10.0))
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                          max_norm=self.config.get('clip_grad_norm', 10.0))
+            optimizer.step()
+        optimizer.zero_grad()
+    
+    return np.mean(losses, axis=0) if losses else np.array([float('inf')])
     
     def train(self):
         """主训练函数"""
@@ -925,17 +945,23 @@ class ColabStage1Trainer:
                 train_loss = self.train_epoch(model, train_loader, optimizer, compute_loss, 
                                             epoch, self.config['epochs'], scaler)
                 
-                # 验证（按频率进行）
+                # 检查训练损失是否有效
+                if np.isnan(train_loss[0]) or np.isinf(train_loss[0]):
+                    self.logger.error(f"Invalid training loss at epoch {epoch+1}! Stopping training.")
+                    break
+                
+                # 验证（每个epoch）
                 val_loss = None
                 map_results = None
                 
                 if (epoch + 1) % self.config.get('val_frequency', 1) == 0:
                     val_loss = self.validate(model, val_loader, compute_loss)
                     
-                    # 详细mAP评估（每5个epoch或最后几个epoch）
-                    if (epoch + 1) % 5 == 0 or epoch >= self.config['epochs'] - 3:
+                    # 更频繁的mAP评估
+                    if (epoch + 1) % self.config.get('map_eval_frequency', 2) == 0 or \
+                       epoch >= self.config['epochs'] - 3:
                         map_results = self.evaluate_map(model, val_loader, 
-                                                       self.save_dir / 'hda_synchild_colab.yaml')
+                                                      self.save_dir / 'hda_synchild_colab.yaml')
                 
                 # 更新EMA
                 if ema:
@@ -1179,78 +1205,110 @@ class ColabStage1Trainer:
         return scheduler
     
     def validate(self, model, val_loader, compute_loss):
-        """验证模型（包含详细mAP评估）"""
-        model.eval()
-        losses = []
-        
-        with torch.no_grad():
-            for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
-                imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
+    """验证模型并输出详细指标"""
+    model.eval()
+    losses = []
+    
+    with torch.no_grad():
+        for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
+            imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
+            
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
+                raw_pred = model(imgs)
+                pred = self.process_model_output_for_loss(raw_pred, is_training=False, debug=False)
                 
-                with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
-                    raw_pred = model(imgs)
-                    
-                    # 使用完善的输出处理方法（验证模式可能返回tuple）
-                    pred = self.process_model_output_for_loss(raw_pred, is_training=False, debug=False)
-                    
+                # 检查预测是否有效
+                if pred and all(not torch.isnan(p).any() for p in pred):
                     loss, loss_items = compute_loss(pred, targets.to(self.device))
-                
-                losses.append(loss_items.cpu().numpy())
+                    
+                    # 只添加有效的损失
+                    if not torch.isnan(loss):
+                        losses.append(loss_items.cpu().numpy())
+    
+    if losses:
+        mean_losses = np.mean(losses, axis=0)
         
-        return np.mean(losses, axis=0)
+        # 输出详细的损失组成（假设loss_items包含[total, box, obj, cls]）
+        if len(mean_losses) >= 4:
+            self.logger.info(f"Validation Loss Details:")
+            self.logger.info(f"  Total: {mean_losses[0]:.4f}")
+            self.logger.info(f"  Box: {mean_losses[1]:.4f}")
+            self.logger.info(f"  Obj: {mean_losses[2]:.4f}")
+            self.logger.info(f"  Cls: {mean_losses[3]:.4f}")
+        
+        return mean_losses
+    else:
+        self.logger.warning("No valid losses in validation!")
+        return np.array([float('inf')])
     
     def evaluate_map(self, model, val_loader, data_yaml_path):
-        """使用YOLOv9的val.py进行完整mAP评估"""
-        try:
-            # 保存当前模型权重到临时文件（YOLOv9兼容格式）
-            temp_weights = self.save_dir / 'temp_weights.pt'
-            torch.save({'model': model.state_dict()}, temp_weights)
-            
-            # 调用YOLOv9的验证函数
-            from val import run as validate_yolo
-            
-            results = validate_yolo(
-                data=data_yaml_path,
-                weights=str(temp_weights),
-                batch_size=self.config['batch_size'] * 2,
-                imgsz=self.config['img_size'],
-                conf_thres=0.001,
-                iou_thres=0.6,
-                max_det=300,
-                task='val',
-                device=str(self.device),
-                workers=self.config['workers'],
-                single_cls=True,
-                augment=False,
-                verbose=False,
-                save_txt=False,
-                save_hybrid=False,
-                save_conf=False,
-                save_json=False,
-                project=str(self.save_dir),
-                name='val',
-                exist_ok=True,
-                half=self.config.get('amp', True),
-                dnn=False
-            )
-            
-            # 清理临时文件
-            if temp_weights.exists():
-                temp_weights.unlink()
-            
-            # 提取关键指标
+    """修复YOLOv9的val.py评估"""
+    try:
+        # 保存当前模型权重（修复格式问题）
+        temp_weights = self.save_dir / 'temp_weights.pt'
+        
+        # 使用YOLOv9期望的格式保存
+        checkpoint = {
+            'epoch': -1,
+            'model': model.float().state_dict(),  # 确保是float32
+            'optimizer': None,
+            'ema': None,
+            'updates': 0,
+            'opt': {'weights': str(temp_weights)}
+        }
+        torch.save(checkpoint, temp_weights)
+        
+        # 调用YOLOv9的验证函数
+        from val import run as validate_yolo
+        
+        results = validate_yolo(
+            data=str(data_yaml_path),  # 确保是字符串
+            weights=str(temp_weights),
+            batch_size=self.config['batch_size'] * 2,
+            imgsz=self.config['img_size'],
+            conf_thres=0.001,
+            iou_thres=0.6,
+            max_det=300,
+            task='val',
+            device=str(self.device),
+            workers=self.config['workers'],
+            single_cls=True,
+            augment=False,
+            verbose=False,
+            save_txt=False,
+            save_hybrid=False,
+            save_conf=False,
+            save_json=False,
+            project=str(self.save_dir),
+            name='val',
+            exist_ok=True,
+            half=False,  # 改为False避免精度问题
+            dnn=False
+        )
+        
+        # 清理临时文件
+        if temp_weights.exists():
+            temp_weights.unlink()
+        
+        # 提取关键指标
+        if results and len(results) >= 4:
             precision, recall, map50, map50_95 = results[:4]
             
             return {
-                'precision': precision,
-                'recall': recall, 
-                'mAP@0.5': map50,
-                'mAP@0.5:0.95': map50_95
+                'precision': float(precision),
+                'recall': float(recall), 
+                'mAP@0.5': float(map50),
+                'mAP@0.5:0.95': float(map50_95)
             }
-            
-        except Exception as e:
-            self.logger.warning(f"mAP evaluation failed: {e}")
+        else:
+            self.logger.warning("Unexpected results format from validation")
             return None
+            
+    except Exception as e:
+        self.logger.warning(f"mAP evaluation failed: {e}")
+        import traceback
+        self.logger.debug(traceback.format_exc())
+        return None
     
     def benchmark_fps(self, model, warmup_runs=10, test_runs=100):
         """FPS基准测试 - 目标: RTX 3060 ≥ 28 FPS"""
@@ -1478,7 +1536,7 @@ def main():
         
         # 数据配置 - A100 GPU优化（80GB显存版）
         'img_size': 640,
-        'batch_size': 32,           # A100可以支持更大batch_size
+        'batch_size': 16,           # A100可以支持更大batch_size
         'workers': 16,              # A100支持更多并行workers
         'pin_memory': True,         # 启用pin_memory加速数据传输（通过环境变量）
         'cache_images': False,      # 禁用缓存避免损坏文件
@@ -1487,18 +1545,20 @@ def main():
         
         # 训练配置 - A100加速版
         'epochs': 20,               # 保持20个epochs
-        'lr0': 0.005,               # 提高学习率适配更大batch_size
-        'warmup_epochs': 2,         # warmup epochs
+        'lr0': 0.001,               # 提高学习率适配更大batch_size
+        'warmup_epochs': 3,         # warmup epochs
         'optimizer': 'AdamW',
         'scheduler': 'cosine',
         'device': 'cuda:0',
         'use_ema': True,
         'save_period': 5,           # 保存频率
         'amp': True,                # 混合精度训练
-        'tf32': True,               # 启用TensorFloat-32优化
-        'gradient_accumulation': 1, # A100大batch_size，减少梯度累积
+        'tf32': False,               # 启用TensorFloat-32优化
+        'gradient_accumulation': 2, # A100大batch_size，减少梯度累积
         'val_frequency': 2,         # 每2个epoch验证一次（更频繁）
+        'map_eval_frequency': 2,    # 新增：每2个epoch评估完整指标
         'patience': 8,              # 稍微增加早停耐心
+        'clip_grad_norm': 10.0,     # 新增：梯度裁剪
         
         # 保存配置
         'save_dir': '/content/runs/stage1_hda_synchild_l4',
