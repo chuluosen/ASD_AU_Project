@@ -1288,13 +1288,22 @@ class ColabStage1Trainer:
             # 保存临时权重文件
             temp_weights = self.save_dir / 'temp_eval_weights.pt'
             
-            # 保存完整的模型文件（包含nn.Module对象）
+            # 创建标准YOLOv9模型并加载权重
+            from models.yolo import Model
             from utils.torch_utils import de_parallel
+            yolo_model = Model(self.config['model_cfg'], ch=3, nc=1, anchors=None).float()
+            
+            # 复制当前模型的权重到标准YOLOv9模型
+            model_state = de_parallel(model).state_dict()
+            missing_keys, unexpected_keys = yolo_model.load_state_dict(model_state, strict=False)
+            
+            # 保存标准格式的checkpoint
             checkpoint = {
-                'model': de_parallel(model).float(),  # 保存nn.Module对象，不是state_dict
+                'model': yolo_model,  # 标准YOLOv9模型
                 'ema': None,
                 'updates': 0,
-                'epoch': -1
+                'epoch': -1,
+                'optimizer': None
             }
             torch.save(checkpoint, temp_weights)
             
