@@ -801,87 +801,87 @@ class ColabStage1Trainer:
                 self.logger.info(f"Removed old checkpoint: {ckpt}")
     
     def train_epoch(self, model, train_loader, optimizer, compute_loss, epoch, epochs, scaler=None):
-    """训练一个epoch（添加NaN保护）"""
-    model.train()
-    pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}')
-    
-    losses = []
-    accumulation_steps = self.config.get('gradient_accumulation', 1)
-    nan_count = 0  # 新增：统计NaN次数
-    
-    for i, (imgs, targets, paths, _) in pbar:
-        imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
+        """训练一个epoch（添加NaN保护）"""
+        model.train()
+        pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}')
         
-        # 前向传播
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
-            raw_pred = model(imgs)
-            pred = self.process_model_output_for_loss(raw_pred, is_training=True, debug=(i == 0))
-            loss, loss_items = compute_loss(pred, targets.to(self.device))
+        losses = []
+        accumulation_steps = self.config.get('gradient_accumulation', 1)
+        nan_count = 0  # 新增：统计NaN次数
+        
+        for i, (imgs, targets, paths, _) in pbar:
+            imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
             
-            # 新增：检查NaN
-            if torch.isnan(loss) or torch.isinf(loss):
-                nan_count += 1
-                self.logger.warning(f"NaN/Inf loss detected in batch {i}! Skipping...")
-                optimizer.zero_grad()
-                if nan_count > 10:  # 如果连续多个NaN，停止训练
-                    raise RuntimeError("Too many NaN losses detected!")
-                continue
+            # 前向传播
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
+                raw_pred = model(imgs)
+                pred = self.process_model_output_for_loss(raw_pred, is_training=True, debug=(i == 0))
+                loss, loss_items = compute_loss(pred, targets.to(self.device))
                 
-            loss = loss / accumulation_steps
-        
-        # 反向传播
-        if scaler is not None:
-            scaler.scale(loss).backward()
+                # 新增：检查NaN
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_count += 1
+                    self.logger.warning(f"NaN/Inf loss detected in batch {i}! Skipping...")
+                    optimizer.zero_grad()
+                    if nan_count > 10:  # 如果连续多个NaN，停止训练
+                        raise RuntimeError("Too many NaN losses detected!")
+                    continue
+                
+                loss = loss / accumulation_steps
             
-            if (i + 1) % accumulation_steps == 0:
-                # 新增：梯度裁剪
+            # 反向传播
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                
+                if (i + 1) % accumulation_steps == 0:
+                    # 新增：梯度裁剪
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                                  max_norm=self.config.get('clip_grad_norm', 10.0))
+                    
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+            else:
+                loss.backward()
+                
+                if (i + 1) % accumulation_steps == 0:
+                    # 新增：梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                                  max_norm=self.config.get('clip_grad_norm', 10.0))
+                    optimizer.step()
+                    optimizer.zero_grad()
+            
+            # 更新进度条
+            if not (torch.isnan(loss) or torch.isinf(loss)):
+                losses.append(loss_items.cpu().numpy())
+            
+            if len(losses) > 100:
+                losses = losses[-100:]
+            
+            if losses:  # 只有在有有效损失时才更新
+                mean_loss = np.mean(losses, axis=0)
+                pbar.set_postfix({
+                    'loss': f'{mean_loss[0]:.4f}',
+                    'GPU': f'{torch.cuda.memory_reserved() / 1024**3:.1f}G',
+                    'NaN': nan_count  # 显示NaN计数
+                })
+        
+        # 处理最后的梯度
+        if (len(train_loader)) % accumulation_steps != 0:
+            if scaler is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 
                                               max_norm=self.config.get('clip_grad_norm', 10.0))
-                
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
-        else:
-            loss.backward()
-            
-            if (i + 1) % accumulation_steps == 0:
-                # 新增：梯度裁剪
+            else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 
                                               max_norm=self.config.get('clip_grad_norm', 10.0))
                 optimizer.step()
-                optimizer.zero_grad()
+            optimizer.zero_grad()
         
-        # 更新进度条
-        if not (torch.isnan(loss) or torch.isinf(loss)):
-            losses.append(loss_items.cpu().numpy())
-        
-        if len(losses) > 100:
-            losses = losses[-100:]
-        
-        if losses:  # 只有在有有效损失时才更新
-            mean_loss = np.mean(losses, axis=0)
-            pbar.set_postfix({
-                'loss': f'{mean_loss[0]:.4f}',
-                'GPU': f'{torch.cuda.memory_reserved() / 1024**3:.1f}G',
-                'NaN': nan_count  # 显示NaN计数
-            })
-    
-    # 处理最后的梯度
-    if (len(train_loader)) % accumulation_steps != 0:
-        if scaler is not None:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 
-                                          max_norm=self.config.get('clip_grad_norm', 10.0))
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 
-                                          max_norm=self.config.get('clip_grad_norm', 10.0))
-            optimizer.step()
-        optimizer.zero_grad()
-    
-    return np.mean(losses, axis=0) if losses else np.array([float('inf')])
+        return np.mean(losses, axis=0) if losses else np.array([float('inf')])
     
     def train(self):
         """主训练函数"""
@@ -1205,110 +1205,110 @@ class ColabStage1Trainer:
         return scheduler
     
     def validate(self, model, val_loader, compute_loss):
-    """验证模型并输出详细指标"""
-    model.eval()
-    losses = []
-    
-    with torch.no_grad():
-        for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
-            imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
-            
-            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
-                raw_pred = model(imgs)
-                pred = self.process_model_output_for_loss(raw_pred, is_training=False, debug=False)
+        """验证模型并输出详细指标"""
+        model.eval()
+        losses = []
+        
+        with torch.no_grad():
+            for imgs, targets, paths, _ in tqdm(val_loader, desc='Validating'):
+                imgs = imgs.to(self.device, non_blocking=True).float() / 255.0
                 
-                # 检查预测是否有效
-                if pred and all(not torch.isnan(p).any() for p in pred):
-                    loss, loss_items = compute_loss(pred, targets.to(self.device))
+                with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.get('amp', True)):
+                    raw_pred = model(imgs)
+                    pred = self.process_model_output_for_loss(raw_pred, is_training=False, debug=False)
                     
-                    # 只添加有效的损失
-                    if not torch.isnan(loss):
-                        losses.append(loss_items.cpu().numpy())
-    
-    if losses:
-        mean_losses = np.mean(losses, axis=0)
+                    # 检查预测是否有效
+                    if pred and all(not torch.isnan(p).any() for p in pred):
+                        loss, loss_items = compute_loss(pred, targets.to(self.device))
+                        
+                        # 只添加有效的损失
+                        if not torch.isnan(loss):
+                            losses.append(loss_items.cpu().numpy())
         
-        # 输出详细的损失组成（假设loss_items包含[total, box, obj, cls]）
-        if len(mean_losses) >= 4:
-            self.logger.info(f"Validation Loss Details:")
-            self.logger.info(f"  Total: {mean_losses[0]:.4f}")
-            self.logger.info(f"  Box: {mean_losses[1]:.4f}")
-            self.logger.info(f"  Obj: {mean_losses[2]:.4f}")
-            self.logger.info(f"  Cls: {mean_losses[3]:.4f}")
-        
-        return mean_losses
-    else:
-        self.logger.warning("No valid losses in validation!")
-        return np.array([float('inf')])
+        if losses:
+            mean_losses = np.mean(losses, axis=0)
+            
+            # 输出详细的损失组成（假设loss_items包含[total, box, obj, cls]）
+            if len(mean_losses) >= 4:
+                self.logger.info(f"Validation Loss Details:")
+                self.logger.info(f"  Total: {mean_losses[0]:.4f}")
+                self.logger.info(f"  Box: {mean_losses[1]:.4f}")
+                self.logger.info(f"  Obj: {mean_losses[2]:.4f}")
+                self.logger.info(f"  Cls: {mean_losses[3]:.4f}")
+            
+            return mean_losses
+        else:
+            self.logger.warning("No valid losses in validation!")
+            return np.array([float('inf')])
     
     def evaluate_map(self, model, val_loader, data_yaml_path):
-    """修复YOLOv9的val.py评估"""
-    try:
-        # 保存当前模型权重（修复格式问题）
-        temp_weights = self.save_dir / 'temp_weights.pt'
-        
-        # 使用YOLOv9期望的格式保存
-        checkpoint = {
-            'epoch': -1,
-            'model': model.float().state_dict(),  # 确保是float32
-            'optimizer': None,
-            'ema': None,
-            'updates': 0,
-            'opt': {'weights': str(temp_weights)}
-        }
-        torch.save(checkpoint, temp_weights)
-        
-        # 调用YOLOv9的验证函数
-        from val import run as validate_yolo
-        
-        results = validate_yolo(
-            data=str(data_yaml_path),  # 确保是字符串
-            weights=str(temp_weights),
-            batch_size=self.config['batch_size'] * 2,
-            imgsz=self.config['img_size'],
-            conf_thres=0.001,
-            iou_thres=0.6,
-            max_det=300,
-            task='val',
-            device=str(self.device),
-            workers=self.config['workers'],
-            single_cls=True,
-            augment=False,
-            verbose=False,
-            save_txt=False,
-            save_hybrid=False,
-            save_conf=False,
-            save_json=False,
-            project=str(self.save_dir),
-            name='val',
-            exist_ok=True,
-            half=False,  # 改为False避免精度问题
-            dnn=False
-        )
-        
-        # 清理临时文件
-        if temp_weights.exists():
-            temp_weights.unlink()
-        
-        # 提取关键指标
-        if results and len(results) >= 4:
-            precision, recall, map50, map50_95 = results[:4]
+        """修复YOLOv9的val.py评估"""
+        try:
+            # 保存当前模型权重（修复格式问题）
+            temp_weights = self.save_dir / 'temp_weights.pt'
             
-            return {
-                'precision': float(precision),
-                'recall': float(recall), 
-                'mAP@0.5': float(map50),
-                'mAP@0.5:0.95': float(map50_95)
+            # 使用YOLOv9期望的格式保存
+            checkpoint = {
+                'epoch': -1,
+                'model': model.float().state_dict(),  # 确保是float32
+                'optimizer': None,
+                'ema': None,
+                'updates': 0,
+                'opt': {'weights': str(temp_weights)}
             }
-        else:
-            self.logger.warning("Unexpected results format from validation")
-            return None
+            torch.save(checkpoint, temp_weights)
             
-    except Exception as e:
-        self.logger.warning(f"mAP evaluation failed: {e}")
-        import traceback
-        self.logger.debug(traceback.format_exc())
-        return None
+            # 调用YOLOv9的验证函数
+            from val import run as validate_yolo
+            
+            results = validate_yolo(
+                data=str(data_yaml_path),  # 确保是字符串
+                weights=str(temp_weights),
+                batch_size=self.config['batch_size'] * 2,
+                imgsz=self.config['img_size'],
+                conf_thres=0.001,
+                iou_thres=0.6,
+                max_det=300,
+                task='val',
+                device=str(self.device),
+                workers=self.config['workers'],
+                single_cls=True,
+                augment=False,
+                verbose=False,
+                save_txt=False,
+                save_hybrid=False,
+                save_conf=False,
+                save_json=False,
+                project=str(self.save_dir),
+                name='val',
+                exist_ok=True,
+                half=False,  # 改为False避免精度问题
+                dnn=False
+            )
+            
+            # 清理临时文件
+            if temp_weights.exists():
+                temp_weights.unlink()
+            
+            # 提取关键指标
+            if results and len(results) >= 4:
+                precision, recall, map50, map50_95 = results[:4]
+                
+                return {
+                    'precision': float(precision),
+                    'recall': float(recall), 
+                    'mAP@0.5': float(map50),
+                    'mAP@0.5:0.95': float(map50_95)
+                }
+            else:
+                self.logger.warning("Unexpected results format from validation")
+                return None
+            
+        except Exception as e:
+            self.logger.warning(f"mAP evaluation failed: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
     
     def benchmark_fps(self, model, warmup_runs=10, test_runs=100):
         """FPS基准测试 - 目标: RTX 3060 ≥ 28 FPS"""
