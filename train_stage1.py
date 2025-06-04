@@ -479,23 +479,33 @@ class ColabStage1Trainer:
         # 步骤1: 获取模型原始输出
         potential_predictions = raw_output
         
-        # 步骤2: 处理评估模式下的元组输出
-        if isinstance(raw_output, tuple):
+        # 步骤2: 处理OrderedDict输出（修复关键问题）
+        from collections import OrderedDict
+        if isinstance(raw_output, OrderedDict):
+            if debug:
+                self.logger.info("Detected OrderedDict output, extracting values")
+            # 提取OrderedDict中的值，通常是tensor列表
+            potential_predictions = list(raw_output.values())
+            if debug:
+                self.logger.info(f"Extracted {len(potential_predictions)} values from OrderedDict")
+        
+        # 步骤3: 处理评估模式下的元组输出
+        if isinstance(potential_predictions, tuple):
             if debug:
                 self.logger.info("Detected tuple output (eval mode)")
             
             # YOLOv9在eval模式下通常返回 (inference_detections, raw_predictions)
             # 我们需要raw_predictions用于损失计算
-            if len(raw_output) >= 2:
-                potential_predictions = raw_output[1]  # 通常raw predictions在第二个位置
+            if len(potential_predictions) >= 2:
+                potential_predictions = potential_predictions[1]  # 通常raw predictions在第二个位置
                 if debug:
                     self.logger.info(f"Using tuple[1] as potential_predictions: {type(potential_predictions)}")
             else:
-                potential_predictions = raw_output[0]
+                potential_predictions = potential_predictions[0]
                 if debug:
                     self.logger.info(f"Using tuple[0] as potential_predictions: {type(potential_predictions)}")
         
-        # 步骤3: 保守的列表处理（不破坏YOLOv9的结构）
+        # 步骤4: 保守的列表处理（不破坏YOLOv9的结构）
         if isinstance(potential_predictions, list):
             # 检查是否为嵌套列表
             if len(potential_predictions) > 0 and isinstance(potential_predictions[0], list):
@@ -520,7 +530,7 @@ class ColabStage1Trainer:
             
             return valid_tensors
         
-        # 步骤4: 如果不是列表，直接返回
+        # 步骤5: 如果不是列表，直接返回
         elif isinstance(potential_predictions, torch.Tensor):
             if debug:
                 self.logger.info(f"Single tensor output, shape: {potential_predictions.shape}")
